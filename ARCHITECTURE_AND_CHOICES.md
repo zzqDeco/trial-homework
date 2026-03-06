@@ -51,14 +51,15 @@ This rerun also clarified the earlier burst-stage failures. After decoupling sta
 
 The implemented design is:
 
-`API -> Redpanda -> Ingestor -> Postgres facts + projection_outbox -> Projector -> Redis read model -> Dashboard API`
+`API -> Redpanda -> Ingestor -> Postgres facts + projection_outbox -> Projector -> Redis read model -> Dashboard API -> Dashboard Web`
 
 This is intentionally layered.
 
 1. Postgres is the fact store.
 2. Redis is the low-latency read model.
-3. Dashboard does not make the front-end choose data sources.
-4. Dashboard API routes requests by time range.
+3. Dashboard API owns source routing and time-series aggregation.
+4. Dashboard Web is a separate front-end service exposed on `:8082`.
+5. The front-end never chooses between Redis and Postgres directly.
 
 ### Why Postgres for facts
 
@@ -131,6 +132,7 @@ Dashboard API accepts:
 
 1. `GET /api/metrics/summary?from=<RFC3339>&to=<RFC3339>`
 2. `GET /api/metrics/by-campaign?from=<RFC3339>&to=<RFC3339>`
+3. `GET /api/metrics/timeseries?from=<RFC3339>&to=<RFC3339>&resolution=auto|minute|hour|day`
 
 Routing rule:
 
@@ -139,6 +141,24 @@ Routing rule:
 3. if the range crosses the 30-day boundary, split the range and merge results in the API layer
 
 The API returns a `source` field with `redis`, `postgres`, or `mixed`.
+
+For charting, the dashboard API also chooses a time resolution:
+
+1. `minute` for short ranges
+2. `hour` for medium ranges
+3. `day` for long ranges
+4. `auto` delegates that choice to the API so the front-end can stay simple
+
+## Dashboard web
+
+The front-end is no longer an inline Go template. It is a separate bundled web app.
+
+1. built with Vite, React, TypeScript, and locally bundled dependencies
+2. served by a dedicated `dashboard-web` container on `:8082`
+3. proxies `/api/*` and `/healthz` to the internal `dashboard-api` service
+4. defaults to English and supports Chinese via a client-side dictionary
+5. refreshes on minute boundaries so the UI matches Redis minute buckets
+6. uses a monochrome, borderless visual system with locally bundled fonts
 
 ## Rebuild and recovery
 
