@@ -95,6 +95,7 @@ services:
       args:
         TARGET: ingestor
     container_name: ingestor
+    restart: on-failure
     environment:
       - KAFKA_BROKERS=redpanda:29092
       - KAFKA_GROUP=bidsrv-ingestor
@@ -109,6 +110,7 @@ services:
       args:
         TARGET: projector
     container_name: projector
+    restart: on-failure
     environment:
       - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/bidsrv?sslmode=disable
       - REDIS_ADDR=redis:6379

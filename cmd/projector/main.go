@@ -30,10 +30,6 @@ func main() {
 	}
 	defer store.Close()
 
-	if err := store.EnsureSchema(ctx); err != nil {
-		log.Fatalf("postgres schema failed: %v", err)
-	}
-
 	model, err := readmodel.New(ctx, redisAddr)
 	if err != nil {
 		log.Fatalf("redis init failed: %v", err)
