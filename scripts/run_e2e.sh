@@ -92,12 +92,12 @@ PY
 fetch_summary_info() {
   local from_ts=$1
   local to_ts=$2
-  curl -fsS "${DASHBOARD_URL}/api/metrics/summary?from=${from_ts}&to=${to_ts}" | python3 - <<'PY'
+  curl -fsS "${DASHBOARD_URL}/api/metrics/summary?from=${from_ts}&to=${to_ts}" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 print(data.get("bid_requests", 0))
 print(data.get("source", "unknown"))
-PY
+'
 }
 
 wait_for_projection_health() {
