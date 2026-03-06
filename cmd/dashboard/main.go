@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"os/signal"
@@ -58,9 +57,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	r.Get("/", srv.handleIndex)
 	r.Get("/api/metrics/summary", srv.handleSummary)
 	r.Get("/api/metrics/by-campaign", srv.handleByCampaign)
+	r.Get("/api/metrics/timeseries", srv.handleTimeSeries)
 
 	httpServer := &http.Server{Addr: ":" + port, Handler: r}
 	go func() {
@@ -70,7 +69,7 @@ func main() {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("dashboard starting on port %s", port)
+	log.Printf("dashboard api starting on port %s", port)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("dashboard failed: %v", err)
 	}
@@ -109,98 +108,19 @@ func (s *dashboardServer) handleByCampaign(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (s *dashboardServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	const page = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Mini Ads Dashboard</title>
-<style>
-:root { --bg: #f4efe7; --ink: #132530; --muted: #5e6e74; --card: #fffaf3; --line: #d7ccc1; --accent: #c05a2b; }
-body { margin: 0; font-family: Georgia, "Times New Roman", serif; background: radial-gradient(circle at top, #fff7ed, var(--bg)); color: var(--ink); }
-main { max-width: 1100px; margin: 0 auto; padding: 32px 20px 48px; }
-h1 { margin: 0 0 8px; font-size: 42px; }
-p { margin: 0; color: var(--muted); }
-.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 24px 0; }
-label { display: block; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
-input, button { width: 100%; box-sizing: border-box; border: 1px solid var(--line); background: var(--card); padding: 12px; font: inherit; color: inherit; }
-button { background: var(--ink); color: #fffaf3; cursor: pointer; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0 24px; }
-.card { background: var(--card); border: 1px solid var(--line); padding: 16px; }
-.card strong { display: block; font-size: 30px; margin-top: 8px; }
-.card span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.table-wrap { background: var(--card); border: 1px solid var(--line); overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; }
-th { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-.status { margin-top: 8px; color: var(--muted); }
-</style>
-</head>
-<body>
-<main>
-<h1>Metrics Dashboard</h1>
-<p>Redis serves recent 30-day queries. Older ranges fall back to Postgres through the same API.</p>
-<div class="controls">
-<div>
-<label for="from">From (UTC)</label>
-<input id="from" type="datetime-local" />
-</div>
-<div>
-<label for="to">To (UTC)</label>
-<input id="to" type="datetime-local" />
-</div>
-<div style="display:flex;align-items:end;">
-<button id="refresh">Refresh</button>
-</div>
-</div>
-<div class="status" id="status">Loading...</div>
-<section class="cards" id="cards"></section>
-<div class="table-wrap">
-<table>
-<thead><tr><th>Campaign</th><th>Bid Requests</th><th>Deduped Impressions</th><th>Unknown Impressions</th><th>View Rate</th></tr></thead>
-<tbody id="rows"></tbody>
-</table>
-</div>
-</main>
-<script>
-const now = new Date();
-const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-const fmt = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-document.getElementById('from').value = fmt(hourAgo);
-document.getElementById('to').value = fmt(now);
-function toUtc(value) { return new Date(value).toISOString(); }
-function pct(v) { return (v * 100).toFixed(2) + '%'; }
-function num(v) { return new Intl.NumberFormat().format(v || 0); }
-async function load() {
-  const from = toUtc(document.getElementById('from').value);
-  const to = toUtc(document.getElementById('to').value);
-  const [summaryRes, campaignRes] = await Promise.all([
-    fetch('/api/metrics/summary?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to)),
-    fetch('/api/metrics/by-campaign?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to))
-  ]);
-  const summary = await summaryRes.json();
-  const campaigns = await campaignRes.json();
-  document.getElementById('status').textContent = 'Source: ' + summary.source + ' | Last projected: ' + (summary.last_projected_at || 'n/a');
-  document.getElementById('cards').innerHTML = [
-    ['View Rate', pct(summary.view_rate || 0)],
-    ['Bid Requests', num(summary.bid_requests)],
-    ['Deduped Impressions', num(summary.deduped_impressions)],
-    ['Unknown Impressions', num(summary.unknown_impressions)]
-  ].map(([label, value]) => '<article class="card"><span>' + label + '</span><strong>' + value + '</strong></article>').join('');
-  document.getElementById('rows').innerHTML = campaigns.campaigns.map((item) =>
-    '<tr><td>' + item.campaign_id + '</td><td>' + num(item.bid_requests) + '</td><td>' + num(item.deduped_impressions) + '</td><td>' + num(item.unknown_impressions) + '</td><td>' + pct(item.view_rate || 0) + '</td></tr>'
-  ).join('');
-}
-document.getElementById('refresh').addEventListener('click', load);
-load().catch((err) => { document.getElementById('status').textContent = err.message; });
-</script>
-</body>
-</html>`
-	tpl := template.Must(template.New("page").Parse(page))
-	if err := tpl.Execute(w, nil); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func (s *dashboardServer) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
+	from, to, err := parseRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
+	resolution := resolveResolution(strings.TrimSpace(r.URL.Query().Get("resolution")), from, to)
+	series, err := s.queryTimeSeries(r.Context(), from, to, resolution)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	respondJSON(w, series)
 }
 
 func (s *dashboardServer) querySummary(ctx context.Context, from, to time.Time) (metrics.Summary, error) {
@@ -252,6 +172,32 @@ func (s *dashboardServer) queryByCampaign(ctx context.Context, from, to time.Tim
 	}
 }
 
+func (s *dashboardServer) queryTimeSeries(ctx context.Context, from, to time.Time, resolution string) (metrics.TimeSeries, error) {
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	switch {
+	case !to.After(cutoff):
+		series, err := s.store.TimeSeries(ctx, from, to, resolution)
+		series.Source = "postgres"
+		return series, err
+	case !from.Before(cutoff):
+		series, err := s.model.TimeSeries(ctx, from, to, resolution)
+		series.Source = "redis"
+		return series, err
+	default:
+		left, err := s.store.TimeSeries(ctx, from, cutoff, resolution)
+		if err != nil {
+			return metrics.TimeSeries{}, err
+		}
+		right, err := s.model.TimeSeries(ctx, cutoff, to, resolution)
+		if err != nil {
+			return metrics.TimeSeries{}, err
+		}
+		merged := metrics.MergeTimeSeries(left, right)
+		merged.Source = "mixed"
+		return merged, nil
+	}
+}
+
 func parseRange(r *http.Request) (time.Time, time.Time, error) {
 	fromRaw := strings.TrimSpace(r.URL.Query().Get("from"))
 	toRaw := strings.TrimSpace(r.URL.Query().Get("to"))
@@ -270,6 +216,25 @@ func parseRange(r *http.Request) (time.Time, time.Time, error) {
 		return time.Time{}, time.Time{}, fmt.Errorf("from must be before to")
 	}
 	return from.UTC(), to.UTC(), nil
+}
+
+func resolveResolution(raw string, from, to time.Time) string {
+	switch raw {
+	case "minute", "hour", "day":
+		return raw
+	case "", "auto":
+		delta := to.Sub(from)
+		switch {
+		case delta <= 6*time.Hour:
+			return "minute"
+		case delta <= 7*24*time.Hour:
+			return "hour"
+		default:
+			return "day"
+		}
+	default:
+		return "minute"
+	}
 }
 
 func respondJSON(w http.ResponseWriter, value interface{}) {

@@ -204,6 +204,49 @@ func (m *Model) ByCampaign(ctx context.Context, from, to time.Time) ([]metrics.C
 	return metrics.NormalizeCampaigns(items), nil
 }
 
+func (m *Model) TimeSeries(ctx context.Context, from, to time.Time, resolution string) (metrics.TimeSeries, error) {
+	resolution = normalizeResolution(resolution)
+	series := metrics.TimeSeries{
+		From:       from.UTC(),
+		To:         to.UTC(),
+		Resolution: resolution,
+	}
+
+	minutes := minuteTimes(from, to)
+	pipe := m.client.Pipeline()
+	cmds := make([]*redis.StringStringMapCmd, 0, len(minutes))
+	for _, minute := range minutes {
+		cmds = append(cmds, pipe.HGetAll(ctx, summaryMinuteKey(minute.Format(minuteLayout))))
+	}
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return series, err
+	}
+
+	grouped := make(map[time.Time]metrics.TimeSeriesPoint)
+	for _, bucket := range seriesBuckets(from, to, resolution) {
+		grouped[bucket] = metrics.TimeSeriesPoint{TS: bucket}
+	}
+	for i, cmd := range cmds {
+		values, err := cmd.Result()
+		if err != nil && err != redis.Nil {
+			return series, err
+		}
+		targetBucket := truncateResolution(minutes[i], resolution)
+		point := grouped[targetBucket]
+		point.TS = targetBucket
+		applyHashCounts(values, &point.BidRequests, &point.DedupedImpressions, &point.UnknownImpressions)
+		grouped[targetBucket] = point
+	}
+
+	series.Points = make([]metrics.TimeSeriesPoint, 0, len(grouped))
+	for _, bucket := range seriesBuckets(from, to, resolution) {
+		series.Points = append(series.Points, grouped[bucket])
+	}
+	series.Points = metrics.NormalizeTimeSeries(series.Points)
+	return series, nil
+}
+
 func (m *Model) Reset(ctx context.Context) error {
 	var cursor uint64
 	for {
@@ -292,9 +335,73 @@ func minuteBuckets(from, to time.Time) []string {
 	return buckets
 }
 
+func minuteTimes(from, to time.Time) []time.Time {
+	start := from.UTC().Truncate(time.Minute)
+	end := to.UTC().Truncate(time.Minute)
+	if !end.Equal(to.UTC()) {
+		end = end.Add(time.Minute)
+	}
+	if !start.Before(end) {
+		return []time.Time{start}
+	}
+	minutes := make([]time.Time, 0, int(end.Sub(start)/time.Minute)+1)
+	for current := start; current.Before(end); current = current.Add(time.Minute) {
+		minutes = append(minutes, current)
+	}
+	return minutes
+}
+
 func toTime(ts int64) time.Time {
 	if ts == 0 {
 		return time.Now().UTC()
 	}
 	return time.Unix(ts, 0).UTC()
+}
+
+func normalizeResolution(resolution string) string {
+	switch resolution {
+	case "hour", "day":
+		return resolution
+	default:
+		return "minute"
+	}
+}
+
+func seriesBuckets(from, to time.Time, resolution string) []time.Time {
+	start := truncateResolution(from.UTC(), resolution)
+	end := truncateResolution(to.UTC(), resolution)
+	if !end.Equal(to.UTC()) {
+		end = advanceResolution(end, resolution)
+	}
+	if !start.Before(end) {
+		return []time.Time{start}
+	}
+	buckets := make([]time.Time, 0)
+	for current := start; current.Before(end); current = advanceResolution(current, resolution) {
+		buckets = append(buckets, current)
+	}
+	return buckets
+}
+
+func truncateResolution(ts time.Time, resolution string) time.Time {
+	ts = ts.UTC()
+	switch normalizeResolution(resolution) {
+	case "day":
+		return time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, time.UTC)
+	case "hour":
+		return ts.Truncate(time.Hour)
+	default:
+		return ts.Truncate(time.Minute)
+	}
+}
+
+func advanceResolution(ts time.Time, resolution string) time.Time {
+	switch normalizeResolution(resolution) {
+	case "day":
+		return ts.AddDate(0, 0, 1)
+	case "hour":
+		return ts.Add(time.Hour)
+	default:
+		return ts.Add(time.Minute)
+	}
 }

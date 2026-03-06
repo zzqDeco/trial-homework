@@ -116,21 +116,28 @@ services:
       - postgres
       - redis
 
-  dashboard:
+  dashboard-api:
     build:
       context: .
       args:
         TARGET: dashboard
-    container_name: dashboard
-    ports:
-      - "8082:8082"
+    container_name: dashboard-api
     environment:
-      - PORT=8082
+      - PORT=8080
       - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/bidsrv?sslmode=disable
       - REDIS_ADDR=redis:6379
     depends_on:
       - postgres
       - redis
+
+  dashboard-web:
+    build:
+      context: ./dashboard-web
+    container_name: dashboard-web
+    ports:
+      - "8082:8082"
+    depends_on:
+      - dashboard-api
 
 volumes:
   redpanda-data:

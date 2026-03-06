@@ -68,6 +68,8 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+node_modules/
+
 ### Emacs ###
 # -*- mode: gitignore; -*-
 *~
@@ -598,3 +600,4 @@ output.bin
 plan/
 AGENTS.md
 CLAUDE.md
+.codex/

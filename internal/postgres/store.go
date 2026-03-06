@@ -340,6 +340,60 @@ WHERE i.event_ts >= $1 AND i.event_ts < $2 AND b.bid_id IS NULL
 	return metrics.NormalizeCampaigns(items), nil
 }
 
+func (s *Store) TimeSeries(ctx context.Context, from, to time.Time, resolution string) (metrics.TimeSeries, error) {
+	resolution = normalizeResolution(resolution)
+	series := metrics.TimeSeries{
+		From:       from.UTC(),
+		To:         to.UTC(),
+		Resolution: resolution,
+	}
+
+	points := make(map[time.Time]metrics.TimeSeriesPoint)
+	for _, bucket := range seriesBuckets(from, to, resolution) {
+		points[bucket] = metrics.TimeSeriesPoint{TS: bucket}
+	}
+
+	bidCounts, err := s.bucketedCounts(ctx, "bids", "", from, to, resolution)
+	if err != nil {
+		return series, err
+	}
+	for ts, count := range bidCounts {
+		point := points[ts]
+		point.TS = ts
+		point.BidRequests = count
+		points[ts] = point
+	}
+
+	dedupCounts, err := s.bucketedCounts(ctx, "impressions i", "JOIN bids b ON b.bid_id = i.bid_id", from, to, resolution)
+	if err != nil {
+		return series, err
+	}
+	for ts, count := range dedupCounts {
+		point := points[ts]
+		point.TS = ts
+		point.DedupedImpressions = count
+		points[ts] = point
+	}
+
+	unknownCounts, err := s.bucketedCounts(ctx, "impressions i", "LEFT JOIN bids b ON b.bid_id = i.bid_id", from, to, resolution, "b.bid_id IS NULL")
+	if err != nil {
+		return series, err
+	}
+	for ts, count := range unknownCounts {
+		point := points[ts]
+		point.TS = ts
+		point.UnknownImpressions = count
+		points[ts] = point
+	}
+
+	series.Points = make([]metrics.TimeSeriesPoint, 0, len(points))
+	for _, bucket := range seriesBuckets(from, to, resolution) {
+		series.Points = append(series.Points, points[bucket])
+	}
+	series.Points = metrics.NormalizeTimeSeries(series.Points)
+	return series, nil
+}
+
 func (s *Store) RecentBids(ctx context.Context, since time.Time) ([]BidRow, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT raw_json
@@ -399,4 +453,96 @@ func toTime(ts int64) time.Time {
 		return time.Now().UTC()
 	}
 	return time.Unix(ts, 0).UTC()
+}
+
+func (s *Store) bucketedCounts(ctx context.Context, fromExpr, joinExpr string, from, to time.Time, resolution string, extraWhere ...string) (map[time.Time]int64, error) {
+	timeColumn := "event_ts"
+	where := "event_ts >= $1 AND event_ts < $2"
+	if fromExpr != "bids" {
+		timeColumn = "i.event_ts"
+		where = "i.event_ts >= $1 AND i.event_ts < $2"
+	}
+	bucketExpr := bucketEpochExpr(resolution, timeColumn)
+	for _, clause := range extraWhere {
+		where += " AND " + clause
+	}
+
+	query := fmt.Sprintf(`
+SELECT %s AS bucket_epoch, COUNT(*)
+FROM %s
+%s
+WHERE %s
+GROUP BY bucket_epoch
+ORDER BY bucket_epoch
+`, bucketExpr, fromExpr, joinExpr, where)
+
+	rows, err := s.pool.Query(ctx, query, from.UTC(), to.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[time.Time]int64)
+	for rows.Next() {
+		var epoch int64
+		var count int64
+		if err := rows.Scan(&epoch, &count); err != nil {
+			return nil, err
+		}
+		out[time.Unix(epoch, 0).UTC()] = count
+	}
+	return out, rows.Err()
+}
+
+func bucketEpochExpr(resolution, timeColumn string) string {
+	resolution = normalizeResolution(resolution)
+	return fmt.Sprintf("EXTRACT(EPOCH FROM date_trunc('%s', %s AT TIME ZONE 'UTC'))::bigint", resolution, timeColumn)
+}
+
+func normalizeResolution(resolution string) string {
+	switch resolution {
+	case "hour", "day":
+		return resolution
+	default:
+		return "minute"
+	}
+}
+
+func seriesBuckets(from, to time.Time, resolution string) []time.Time {
+	start := truncateResolution(from.UTC(), resolution)
+	end := truncateResolution(to.UTC(), resolution)
+	if !end.Equal(to.UTC()) {
+		end = advanceResolution(end, resolution)
+	}
+	if !start.Before(end) {
+		return []time.Time{start}
+	}
+	buckets := make([]time.Time, 0)
+	for current := start; current.Before(end); current = advanceResolution(current, resolution) {
+		buckets = append(buckets, current)
+	}
+	return buckets
+}
+
+func truncateResolution(ts time.Time, resolution string) time.Time {
+	ts = ts.UTC()
+	switch normalizeResolution(resolution) {
+	case "day":
+		return time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, time.UTC)
+	case "hour":
+		return ts.Truncate(time.Hour)
+	default:
+		return ts.Truncate(time.Minute)
+	}
+}
+
+func advanceResolution(ts time.Time, resolution string) time.Time {
+	switch normalizeResolution(resolution) {
+	case "day":
+		return ts.AddDate(0, 0, 1)
+	case "hour":
+		return ts.Add(time.Hour)
+	default:
+		return ts.Add(time.Minute)
+	}
 }

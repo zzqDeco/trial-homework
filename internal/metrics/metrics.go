@@ -25,6 +25,22 @@ type CampaignMetrics struct {
 	ViewRate           float64 `json:"view_rate"`
 }
 
+type TimeSeriesPoint struct {
+	TS                 time.Time `json:"ts"`
+	BidRequests        int64     `json:"bid_requests"`
+	DedupedImpressions int64     `json:"deduped_impressions"`
+	UnknownImpressions int64     `json:"unknown_impressions"`
+	ViewRate           float64   `json:"view_rate"`
+}
+
+type TimeSeries struct {
+	From       time.Time         `json:"from"`
+	To         time.Time         `json:"to"`
+	Source     string            `json:"source"`
+	Resolution string            `json:"resolution"`
+	Points     []TimeSeriesPoint `json:"points"`
+}
+
 func (s *Summary) Finalize(now time.Time) {
 	s.ViewRate = ComputeViewRate(s.DedupedImpressions, s.BidRequests)
 	if s.LastProjectedAt != nil {
@@ -90,4 +106,42 @@ func MergeCampaigns(left, right []CampaignMetrics) []CampaignMetrics {
 		out = append(out, item)
 	}
 	return NormalizeCampaigns(out)
+}
+
+func NormalizeTimeSeries(points []TimeSeriesPoint) []TimeSeriesPoint {
+	for i := range points {
+		points[i].ViewRate = ComputeViewRate(points[i].DedupedImpressions, points[i].BidRequests)
+	}
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].TS.Before(points[j].TS)
+	})
+	return points
+}
+
+func MergeTimeSeries(left, right TimeSeries) TimeSeries {
+	merged := make(map[time.Time]TimeSeriesPoint, len(left.Points)+len(right.Points))
+	for _, point := range left.Points {
+		merged[point.TS.UTC()] = point
+	}
+	for _, point := range right.Points {
+		key := point.TS.UTC()
+		current := merged[key]
+		current.TS = key
+		current.BidRequests += point.BidRequests
+		current.DedupedImpressions += point.DedupedImpressions
+		current.UnknownImpressions += point.UnknownImpressions
+		merged[key] = current
+	}
+
+	out := TimeSeries{
+		From:       left.From,
+		To:         right.To,
+		Resolution: left.Resolution,
+	}
+	out.Points = make([]TimeSeriesPoint, 0, len(merged))
+	for _, point := range merged {
+		out.Points = append(out.Points, point)
+	}
+	out.Points = NormalizeTimeSeries(out.Points)
+	return out
 }
