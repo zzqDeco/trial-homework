@@ -1,185 +1,114 @@
-# Take-Home Assignment (16h)
+# zzqDeco Zarli Take-Home Submission
 
-## Zarli — Event Pipeline + Metrics Dashboard (GCP VM)
+This repository delivers the complete event pipeline and dashboard implementation for the Zarli take-home assignment. Bid and impression traffic is generated through the provided HTTP APIs, transported through Redpanda, persisted as facts in Postgres, projected asynchronously into Redis, and served through an independent dashboard frontend exposed on `:8082`.
 
-## Trial Homework Objective
+## What Was Built
 
-This homework is part of our trial evaluation process for a potential full-time Software Engineer role at **InstantConnect Inc (dba Zarli AI)**.
+1. HTTP-driven load generation for bids and impressions
+2. Redpanda ingestion into Postgres fact tables
+3. Asynchronous Redis projection via `projection_outbox`
+4. Dashboard API with Redis/Postgres source routing
+5. Independent dashboard web frontend on `:8082`
 
-The goal is to assess your ability to design and deliver an end-to-end, production-minded system under a tight timebox:
+## Architecture Overview
 
-* make correct engineering choices with clear tradeoffs
-* handle production-like messy events and scale considerations
-* build a low-latency metrics dashboard with a clear, consistent metric definition
-* automate deployment and produce reproducible results on a Linux VM
-* use AI tools effectively while still demonstrating strong judgment and verification discipline
+`HTTP API -> Redpanda -> ingestor -> Postgres + projection_outbox -> projector -> Redis -> dashboard-api -> dashboard-web`
 
-**Deliverable-based evaluation:** we evaluate only the deliverables defined in this document. We do not evaluate time spent, and we do not expect perfection—only a correct, stable, minimal implementation consistent with the requirements.
+1. Postgres is the fact store.
+2. Redis is the recent read model.
+3. `dashboard-api` routes between Redis, Postgres, and mixed queries.
+4. `dashboard-web` is a separate frontend container.
+5. The public dashboard entrypoint is `http://<VM_IP>:8082`.
 
-**Hiring pathway:** strong submissions may progress to next stage and can lead to a full-time offer, subject to team fit and interviews. Completion of this homework does not guarantee an offer.
+## Deliverables Mapping
 
----
+### Deliverable A
 
-## Time, Submission
+1. `cmd/loadgen`
+2. `cmd/verify_topic_counts`
+3. `scripts/run_deliverable_a.sh`
 
-* **Timebox:** up to **16 hours** (across **3 calendar days assuming part-time**)
-* **Submission:**
+### Deliverable B
 
-  * GitHub repo link (all code/scripts/config + README)
-  * `AI_USAGE.md` (which AI tools you used + what you manually verified)
+1. `cmd/ingestor`
+2. Postgres fact tables
+3. `projection_outbox`
 
----
+### Deliverable C
 
-## Provided Environment (GCP VM) + Access
+1. `cmd/projector`
+2. `cmd/dashboard`
+3. `dashboard-web`
+4. Dashboard exposed on `:8082`
 
-We will provide an **empty GCP Compute Engine VM (Singapore region)**.
+### Deliverable D
 
-To get access:
+1. `scripts/reset_data.sh`
+2. `scripts/run_e2e.sh`
+
+## Quick Start
 
 ```bash
-ssh-keygen -t ed25519 -C "your_email_address" -f ~/.ssh/zarli_trial_homework_access
-cat ~/.ssh/zarli_trial_homework_access.pub
+docker-compose up -d --build
+./scripts/reset_data.sh
+WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh
 ```
 
-Email the raw `.pub` content to **[founders@zarli.ai](mailto:founders@zarli.ai)**.
-We will reply with the exact SSH command.
+Access points:
 
----
+1. API health: `http://<VM_IP>:8080/healthz`
+2. Dashboard: `http://<VM_IP>:8082`
 
-## Provided Starter Repo: Mini Ads Bidding Server 
+## Manual Verification
 
-We will provide a GitHub repository containing a **Mini Ads Bidding Server** that runs via docker compose and exposes:
+API health:
 
-* `POST /v1/bid`
-* `POST /v1/billing`
+```bash
+curl http://localhost:8080/healthz
+```
 
-The repo already includes:
+Dashboard health:
 
-* Go server (listens on `0.0.0.0:8080` inside the container)
-* Redis for billing idempotency
-* Redpanda (Kafka-compatible) for event logging to topics:
+```bash
+curl http://localhost:8082/healthz
+```
 
-  * `bid-requests`
-  * `impressions`
-* An init step that creates the topics automatically on startup
+Summary:
 
-You are expected to **use these HTTP endpoints** to generate events for Deliverable A.
+```bash
+curl 'http://localhost:8082/api/metrics/summary?from=2026-03-06T00:00:00Z&to=2026-03-07T00:00:00Z'
+```
 
-> You may extend the starter repo (recommended), but Deliverable A must be driven by **HTTP calls to the bidding server**, not by directly producing to Redpanda.
+By campaign:
 
----
+```bash
+curl 'http://localhost:8082/api/metrics/by-campaign?from=2026-03-06T00:00:00Z&to=2026-03-07T00:00:00Z'
+```
 
-## Homework Overview
+Timeseries:
 
-You will build a system that:
+```bash
+curl 'http://localhost:8082/api/metrics/timeseries?from=2026-03-06T00:00:00Z&to=2026-03-07T00:00:00Z&resolution=auto'
+```
 
-1. populates Redpanda with a large set of bid and impression events (including production-realistic corner cases),
-2. ingests those events into a queryable storage layer,
-3. serves a low-latency dashboard that computes key metrics (including View Rate),
-4. explains your design choices and tech stack rationale.
+`run_e2e.sh` validates load generation, topic thresholds, service liveness, projection health, and non-zero dashboard metrics.
 
----
+## Latest Validated Result
 
-# Deliverables (Required)
+The latest clean-room full run used:
 
-## Deliverable A — Populate Redpanda via HTTP Calls (Outcome-based)
+1. `./scripts/reset_data.sh`
+2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh`
 
-### Goal
+Observed result:
 
-After your system is executed, Redpanda must contain:
+1. `targets_met=true`
+2. `burst_slo_met=true`
+3. `bid-requests=33825`
+4. `impressions=28487`
+5. `projection_outbox backlog=0`
+6. Dashboard summary returned non-zero Redis-backed metrics
 
-* **>10,000 Bid events** in topic `bid-requests`
-* **>10,000 Impression events** in topic `impressions`
+## Additional Documentation
 
-### Key Requirement
-
-You must generate these events by calling the **provided bidding server HTTP APIs**:
-
-* call `/v1/bid` to create bids
-* call `/v1/billing` using returned `bid_id` to create impressions
-
-### Additional Requirement
-
-The generated events must include a meaningful mix of **production-realistic corner cases** you consider representative of mobile ads telemetry.
-
-### Acceptance
-
-We must be able to run your repo on the VM and observe:
-
-* Redpanda has **>10k** events in both topics
-* your ingestion and dashboard work on the resulting data (Deliverables B/C)
-
----
-
-## Deliverable B — Ingestion + Storage (Outcome-based)
-
-Implement a pipeline that consumes from Redpanda and persists events into a queryable storage system so the dashboard can compute metrics quickly.
-
-You decide:
-
-* storage technology
-* data model/schema
-* dedup strategy and matching strategy between bids and impressions
-* whether/how to do pre-aggregation, indexing, caching, etc.
-
-Acceptance:
-
-* the dashboard can reliably compute View Rate and required breakdowns
-* system is reproducible on the VM
-
----
-
-## Deliverable C — Low-Latency Web Dashboard (Web)
-
-The dashboard must be accessible at:
-
-* `http://<VM_EXTERNAL_IP>:8082`
-
-### Required Metric Definition
-
-**View Rate = (deduped impressions) / (bid requests)**
-
-The dashboard must show at minimum:
-
-1. View Rate
-2. counts of:
-
-   * deduped impressions
-   * bid requests
-   * unknown/unmatched impressions (impressions without a corresponding bid)
-3. at least one segmentation dimension (you choose)
-
----
-
-## Deliverable D — Verification + Architecture & Choices
-
-Provide:
-
-1. A reproducible way to run the system end-to-end on a clean VM (script or documented commands)
-2. `ARCHITECTURE_AND_CHOICES.md` explaining:
-
-   * how you achieved A (how you drove >10k bid + >10k impressions via HTTP, and what corner cases you included)
-   * how you achieved B (storage/ingestion choices + tradeoffs)
-   * how you achieved C (dashboard approach + latency considerations)
-   * why you chose your tech stack, and what you’d change for 100x scale
-
----
-
-# Non-Goals (Not required)
-
-* full production ads bidding system
-* multi-region
-* fancy UI polish
-* complex IaC
-
----
-
-# Repo Checklist (Must include)
-
-* README.md (clear run steps)
-* code/scripts/config required to run on VM
-* dashboard accessible on :8080
-* AI_USAGE.md
-* ARCHITECTURE_AND_CHOICES.md
-
----
+1. [ARCHITECTURE_AND_CHOICES.md](./ARCHITECTURE_AND_CHOICES.md)
