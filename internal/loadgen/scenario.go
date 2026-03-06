@@ -186,13 +186,12 @@ func runTimedStage(ctx context.Context, client *Client, collector *Collector, st
 	collector.StartStage(stage.Name)
 	defer collector.EndStage(stage.Name)
 
-	stageCtx, cancel := context.WithTimeout(ctx, stage.Duration)
-	defer cancel()
+	stageDeadline := time.Now().UTC().Add(stage.Duration)
 
 	var wg sync.WaitGroup
 
 	monitorDone := make(chan struct{})
-	go monitorNoResponseGap(stageCtx, collector, stage.Name, monitorDone)
+	go monitorNoResponseGap(ctx, collector, stage.Name, monitorDone)
 
 	for workerID := 0; workerID < stage.Workers; workerID++ {
 		wg.Add(1)
@@ -201,10 +200,13 @@ func runTimedStage(ctx context.Context, client *Client, collector *Collector, st
 			r := rand.New(rand.NewSource(seed + int64(workerID) + 1))
 			for {
 				select {
-				case <-stageCtx.Done():
+				case <-ctx.Done():
 					return
 				default:
-					runSingleStageIteration(stageCtx, client, collector, stage, r)
+					if !time.Now().UTC().Before(stageDeadline) {
+						return
+					}
+					runSingleStageIteration(ctx, client, collector, stage, r)
 				}
 			}
 		}(workerID)
