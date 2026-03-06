@@ -43,7 +43,14 @@ services:
     container_name: init-kafka
     depends_on:
       - redpanda
-    entrypoint: ["sh", "-c", "sleep 5 && rpk topic create bid-requests impressions --brokers redpanda:29092 || true"]
+    restart: on-failure
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until rpk topic create bid-requests impressions --brokers redpanda:29092; do
+          sleep 2
+        done
 
   redis:
     image: redis:7-alpine
