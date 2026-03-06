@@ -601,3 +601,5 @@ plan/
 AGENTS.md
 CLAUDE.md
 .codex/
+
+*.tsbuildinfo
