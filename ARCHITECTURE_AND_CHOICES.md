@@ -34,6 +34,17 @@ Generate events only through:
 2. `cmd/verify_topic_counts` validates both topics by summing partition offsets.
 3. `deliverable_a_report.json` records counters, stage stats, and pass/fail results.
 
+### Latest VM validation result
+
+On the latest VM verification run using commit `4966e08`, Deliverable A completed successfully end-to-end.
+
+1. `targets_met=true`
+2. `burst_slo_met=true`
+3. `exit_code=0`
+4. the VM topic high-watermarks observed after the run were `194,642` for `bid-requests` and `174,092` for `impressions`, both comfortably above the required `10,000+` threshold
+
+This rerun also clarified the earlier burst-stage failures. After decoupling stage admission from per-request timeout handling inside the load generator, burst-stage network error rates dropped to `0`, which indicates that the earlier failures were caused by harness-side stage cutoff semantics rather than server-side `5xx` errors or service instability.
+
 ## Deliverable B/C Architecture
 
 ### Final design
