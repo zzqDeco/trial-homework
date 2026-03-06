@@ -58,16 +58,11 @@ const refreshBufferMs = 1_000
 const messages = {
   en: {
     title: 'Mini Ads Dashboard',
-    subtitle: 'Independent monitoring surface for the Redis-backed read model and historical Postgres fallback.',
     range: 'Range',
     from: 'From',
     to: 'To',
     refresh: 'Refresh now',
-    autoRefresh: 'Auto refresh every minute',
     nextRefresh: 'Next refresh',
-    source: 'Source',
-    lastProjected: 'Last projected',
-    lag: 'Projection lag',
     kpiViewRate: 'View Rate',
     kpiBidRequests: 'Bid Requests',
     kpiDeduped: 'Deduped Impressions',
@@ -84,14 +79,9 @@ const messages = {
     dedupedImpressions: 'Deduped Impressions',
     unknownImpressions: 'Unknown Impressions',
     tableTitle: 'Campaign breakdown',
-    tableCaption: 'Sorted by bid request volume. UNKNOWN stays visible when unmatched impressions exist.',
     lineTitle: 'Demand vs matched delivery',
-    lineCaption: 'Bid requests and deduped impressions across the selected range.',
     unknownTitle: 'Unknown impression volume',
-    unknownCaption: 'Immediate unmatched counts based on current projection state.',
     campaignChartTitle: 'Top campaigns by bid requests',
-    campaignChartCaption: 'Horizontal comparison of the heaviest campaign segments.',
-    statusReady: 'Live data',
     errorPrefix: 'Dashboard request failed:',
     invalidRange: 'From must be earlier than To.',
     language: 'Language',
@@ -104,16 +94,11 @@ const messages = {
   },
   zh: {
     title: 'Mini Ads 仪表盘',
-    subtitle: '用于 Redis 读模型与 Postgres 历史回查的独立监控界面。',
     range: '时间范围',
     from: '开始时间',
     to: '结束时间',
     refresh: '立即刷新',
-    autoRefresh: '每分钟自动刷新',
     nextRefresh: '下次刷新',
-    source: '数据源',
-    lastProjected: '最近投影时间',
-    lag: '投影延迟',
     kpiViewRate: '展示率',
     kpiBidRequests: 'Bid 请求数',
     kpiDeduped: '去重 Impression 数',
@@ -130,14 +115,9 @@ const messages = {
     dedupedImpressions: '去重 Impression 数',
     unknownImpressions: 'Unknown Impression 数',
     tableTitle: 'Campaign 分组明细',
-    tableCaption: '按 bid request 数量降序排列；存在 unmatched 数据时会保留 UNKNOWN。',
     lineTitle: '需求与匹配展示',
-    lineCaption: '展示所选时间范围内的 bid requests 与 deduped impressions。',
     unknownTitle: 'Unknown impression 体量',
-    unknownCaption: '基于当前投影状态的即时 unmatched 数量。',
     campaignChartTitle: 'Top campaign bid requests',
-    campaignChartCaption: '横向对比主要 campaign 的 bid request 体量。',
-    statusReady: '实时数据',
     errorPrefix: '仪表盘请求失败：',
     invalidRange: '开始时间必须早于结束时间。',
     language: '语言',
@@ -265,8 +245,6 @@ function useMinuteAlignedRefresh(onRefresh: () => void) {
 
 function reorderCampaigns(items: CampaignMetrics[]): CampaignMetrics[] {
   const sorted = [...items].sort((a, b) => {
-    if (a.campaign_id === 'UNKNOWN' && b.campaign_id !== 'UNKNOWN') return -1
-    if (b.campaign_id === 'UNKNOWN' && a.campaign_id !== 'UNKNOWN') return 1
     if (b.bid_requests === a.bid_requests) return a.campaign_id.localeCompare(b.campaign_id)
     return b.bid_requests - a.bid_requests
   })
@@ -460,12 +438,11 @@ function ChartPanel({ title, caption, option, height = 280 }: ChartPanelProps) {
     <section className="panel chart-panel">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Chart</p>
           <h2>{title}</h2>
         </div>
       </div>
       <div ref={ref} className="chart-canvas" style={{ height }} aria-hidden="true" />
-      <p className="panel-caption">{caption}</p>
+      {caption ? <p className="panel-caption">{caption}</p> : null}
     </section>
   )
 }
@@ -559,18 +536,13 @@ export default function App() {
   }, [rangeValid, resync])
 
   const currentResolution = series?.resolution ?? 'minute'
-  const infoLine = summary
-    ? `${text.source}: ${summary.source.toUpperCase()}  |  ${text.lastProjected}: ${formatDateTime(locale, summary.last_projected_at)}  |  ${text.lag}: ${summary.projection_lag_seconds?.toFixed(2) ?? '0.00'}s`
-    : text.loading
 
   return (
     <div className="app-shell">
       <main className="layout">
         <header className="hero">
           <div className="hero-copy">
-            <p className="eyebrow">Mini Ads</p>
             <h1>{text.title}</h1>
-            <p className="hero-subtitle">{text.subtitle}</p>
           </div>
           <div className="hero-meta">
             <div className="language-toggle" role="group" aria-label={text.language}>
@@ -582,8 +554,7 @@ export default function App() {
               </button>
             </div>
             <div className="status-block" aria-live="polite">
-              <span>{loading ? text.loading : text.statusReady}</span>
-              <span>{infoLine}</span>
+              {loading ? <span>{text.loading}</span> : null}
               <span>{text.nextRefresh}: {formatDateTime(locale, nextRefreshAt)}</span>
             </div>
           </div>
@@ -591,10 +562,6 @@ export default function App() {
 
         <section className="control-strip panel">
           <div className="control-header">
-            <div>
-              <p className="eyebrow">{text.range}</p>
-              <h2>{text.autoRefresh}</h2>
-            </div>
             <div className="resolution-chip">{text.resolution}: {resolutionLabel(locale, currentResolution)}</div>
           </div>
           <div className="preset-row">
@@ -638,22 +605,18 @@ export default function App() {
 
         <section className="kpi-grid">
           <article className="kpi panel">
-            <p className="eyebrow">KPI</p>
             <span>{text.kpiViewRate}</span>
             <strong>{formatPercent(locale, summary?.view_rate ?? 0)}</strong>
           </article>
           <article className="kpi panel">
-            <p className="eyebrow">KPI</p>
             <span>{text.kpiBidRequests}</span>
             <strong>{formatNumber(locale, summary?.bid_requests ?? 0)}</strong>
           </article>
           <article className="kpi panel">
-            <p className="eyebrow">KPI</p>
             <span>{text.kpiDeduped}</span>
             <strong>{formatNumber(locale, summary?.deduped_impressions ?? 0)}</strong>
           </article>
           <article className="kpi panel">
-            <p className="eyebrow">KPI</p>
             <span>{text.kpiUnknown}</span>
             <strong>{formatNumber(locale, summary?.unknown_impressions ?? 0)}</strong>
           </article>
@@ -662,19 +625,19 @@ export default function App() {
         <section className="chart-grid">
           <ChartPanel
             title={text.lineTitle}
-            caption={text.lineCaption}
+            caption=""
             option={buildTrendOption(locale, text, series ?? { source: 'redis', resolution: 'minute', points: [] })}
           />
           <ChartPanel
             title={text.unknownTitle}
-            caption={text.unknownCaption}
+            caption=""
             option={buildUnknownOption(locale, text, series ?? { source: 'redis', resolution: 'minute', points: [] })}
           />
         </section>
 
         <ChartPanel
           title={text.campaignChartTitle}
-          caption={text.campaignChartCaption}
+          caption=""
           option={buildCampaignOption(text, campaigns)}
           height={360}
         />
@@ -682,10 +645,8 @@ export default function App() {
         <section className="panel table-panel">
           <div className="panel-header">
             <div>
-              <p className="eyebrow">Table</p>
               <h2>{text.tableTitle}</h2>
             </div>
-            <p className="panel-caption table-note">{text.tableCaption}</p>
           </div>
           <div className="table-wrap">
             <table>

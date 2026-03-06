@@ -95,17 +95,9 @@ input:focus-visible {
   font-weight: 600;
 }
 
-.hero-subtitle {
-  max-width: 38rem;
-  margin: 1rem 0 0;
-  color: var(--muted);
-  font-size: 1rem;
-  line-height: 1.6;
-}
-
 .hero-meta {
   display: grid;
-  gap: 1rem;
+  gap: 0.65rem;
   justify-items: end;
 }
 
@@ -118,8 +110,8 @@ input:focus-visible {
 }
 
 .toggle {
-  padding: 0.7rem 1rem;
-  min-width: 72px;
+  padding: 0.5rem 0.85rem;
+  min-width: 60px;
 }
 
 .toggle.active,
@@ -131,11 +123,11 @@ input:focus-visible {
 
 .status-block {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.15rem;
   justify-items: end;
   text-align: right;
   color: var(--muted);
-  font-size: 0.92rem;
+  font-size: 0.82rem;
 }
 
 .panel {
@@ -153,6 +145,10 @@ input:focus-visible {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.control-header {
+  justify-content: flex-end;
 }
 
 .control-header h2,
@@ -226,7 +222,7 @@ input:focus-visible {
 
 .kpi span {
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.92rem;
 }
 
 .kpi strong,
@@ -262,11 +258,6 @@ input:focus-visible {
   color: var(--muted);
   font-size: 0.92rem;
   line-height: 1.5;
-}
-
-.table-note {
-  max-width: 28rem;
-  text-align: right;
 }
 
 .table-wrap {
@@ -329,9 +320,6 @@ tbody tr:hover {
     align-items: flex-start;
   }
 
-  .table-note {
-    text-align: left;
-  }
 }
 
 @media (max-width: 640px) {
