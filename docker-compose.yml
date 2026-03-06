@@ -5,15 +5,23 @@ services:
     command:
       - redpanda
       - start
-      - --smp 1
-      - --memory 1G
-      - --reserve-memory 0M
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
       - --overprovisioned
-      - --node-id 0
-      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
-      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
-      - --pandaproxy-addr 0.0.0.0:8082
-      - --advertise-pandaproxy-addr localhost:8082
+      - --node-id
+      - "0"
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr
+      - 0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - localhost:8082
     ports:
       - "9092:9092"
       - "29092:29092"
@@ -35,7 +43,7 @@ services:
     container_name: init-kafka
     depends_on:
       - redpanda
-    entrypoint: [ "sh", "-c", "sleep 5 && rpk topic create bid-requests impressions --brokers redpanda:29092" ]
+    entrypoint: ["sh", "-c", "sleep 5 && rpk topic create bid-requests impressions --brokers redpanda:29092 || true"]
 
   redis:
     image: redis:7-alpine
@@ -45,8 +53,23 @@ services:
     volumes:
       - redis-data:/data
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=bidsrv
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   api:
-    build: .
+    build:
+      context: .
+      args:
+        TARGET: server
     container_name: bidsrv
     ports:
       - "8080:8080"
@@ -59,6 +82,50 @@ services:
       - init-kafka
       - redis
 
+  ingestor:
+    build:
+      context: .
+      args:
+        TARGET: ingestor
+    container_name: ingestor
+    environment:
+      - KAFKA_BROKERS=redpanda:29092
+      - KAFKA_GROUP=bidsrv-ingestor
+      - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/bidsrv?sslmode=disable
+    depends_on:
+      - init-kafka
+      - postgres
+
+  projector:
+    build:
+      context: .
+      args:
+        TARGET: projector
+    container_name: projector
+    environment:
+      - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/bidsrv?sslmode=disable
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - postgres
+      - redis
+
+  dashboard:
+    build:
+      context: .
+      args:
+        TARGET: dashboard
+    container_name: dashboard
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/bidsrv?sslmode=disable
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - postgres
+      - redis
+
 volumes:
   redpanda-data:
   redis-data:
+  postgres-data:
