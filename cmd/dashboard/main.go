@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/sync/errgroup"
 
 	"bidsrv/internal/metrics"
 	"bidsrv/internal/platform"
@@ -135,12 +136,20 @@ func (s *dashboardServer) querySummary(ctx context.Context, from, to time.Time) 
 		summary.Source = "redis"
 		return summary, err
 	default:
-		left, err := s.store.Summary(ctx, from, cutoff)
-		if err != nil {
-			return metrics.Summary{}, err
-		}
-		right, err := s.model.Summary(ctx, cutoff, to)
-		if err != nil {
+		var left metrics.Summary
+		var right metrics.Summary
+		g, gctx := errgroup.WithContext(ctx)
+		g.Go(func() error {
+			var err error
+			left, err = s.store.Summary(gctx, from, cutoff)
+			return err
+		})
+		g.Go(func() error {
+			var err error
+			right, err = s.model.Summary(gctx, cutoff, to)
+			return err
+		})
+		if err := g.Wait(); err != nil {
 			return metrics.Summary{}, err
 		}
 		merged := metrics.MergeSummary(left, right)
@@ -160,12 +169,20 @@ func (s *dashboardServer) queryByCampaign(ctx context.Context, from, to time.Tim
 		items, err := s.model.ByCampaign(ctx, from, to)
 		return items, "redis", err
 	default:
-		left, err := s.store.ByCampaign(ctx, from, cutoff)
-		if err != nil {
-			return nil, "", err
-		}
-		right, err := s.model.ByCampaign(ctx, cutoff, to)
-		if err != nil {
+		var left []metrics.CampaignMetrics
+		var right []metrics.CampaignMetrics
+		g, gctx := errgroup.WithContext(ctx)
+		g.Go(func() error {
+			var err error
+			left, err = s.store.ByCampaign(gctx, from, cutoff)
+			return err
+		})
+		g.Go(func() error {
+			var err error
+			right, err = s.model.ByCampaign(gctx, cutoff, to)
+			return err
+		})
+		if err := g.Wait(); err != nil {
 			return nil, "", err
 		}
 		return metrics.MergeCampaigns(left, right), "mixed", nil
@@ -184,12 +201,20 @@ func (s *dashboardServer) queryTimeSeries(ctx context.Context, from, to time.Tim
 		series.Source = "redis"
 		return series, err
 	default:
-		left, err := s.store.TimeSeries(ctx, from, cutoff, resolution)
-		if err != nil {
-			return metrics.TimeSeries{}, err
-		}
-		right, err := s.model.TimeSeries(ctx, cutoff, to, resolution)
-		if err != nil {
+		var left metrics.TimeSeries
+		var right metrics.TimeSeries
+		g, gctx := errgroup.WithContext(ctx)
+		g.Go(func() error {
+			var err error
+			left, err = s.store.TimeSeries(gctx, from, cutoff, resolution)
+			return err
+		})
+		g.Go(func() error {
+			var err error
+			right, err = s.model.TimeSeries(gctx, cutoff, to, resolution)
+			return err
+		})
+		if err := g.Wait(); err != nil {
 			return metrics.TimeSeries{}, err
 		}
 		merged := metrics.MergeTimeSeries(left, right)
