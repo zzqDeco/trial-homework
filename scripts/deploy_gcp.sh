@@ -1,12 +1,15 @@
 #!/bin/bash
-set -e
+# Create a fresh VM, deploy the repo, and run the clean-room end-to-end flow on the target machine.
+set -euo pipefail
 
-PROJECT_ID="trial-homework"
-ZONE="asia-southeast1-c"
-MACHINE_TYPE="e2-medium"
-# Generate a unique instance name using a timestamp
-INSTANCE_NAME="bidding-server-$(date +%s)"
-REPO_URL="https://github.com/jinxicmu/trial-homework.git"
+PROJECT_ID=${PROJECT_ID:-"trial-homework"}
+ZONE=${ZONE:-"asia-southeast1-c"}
+MACHINE_TYPE=${MACHINE_TYPE:-"e2-medium"}
+INSTANCE_NAME=${INSTANCE_NAME:-"bidding-server-$(date +%s)"}
+REPO_URL=${REPO_URL:-"https://github.com/zzqDeco/trial-homework.git"}
+REMOTE_DIR=${REMOTE_DIR:-"trial-homework"}
+WAIT_TIMEOUT_SECONDS=${WAIT_TIMEOUT_SECONDS:-300}
+PROJECTION_TIMEOUT_SECONDS=${PROJECTION_TIMEOUT_SECONDS:-120}
 
 echo "=================================================="
 echo "1. Selecting GCP project..."
@@ -44,16 +47,42 @@ for i in {1..10}; do
 done
 
 echo "=================================================="
-echo "4. Deploying the GitHub repo via SSH..."
+echo "4. Deploying repo and running clean-room E2E..."
 echo "=================================================="
-gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --project=$PROJECT_ID --command="
-    sudo apt-get update &&
-    sudo apt-get install -y git docker.io docker-compose &&
-    git clone $REPO_URL zarli-trial-hw &&
-    cd zarli-trial-hw &&
-    sudo systemctl start docker &&
-    sudo docker-compose up -d --build
-"
+REMOTE_COMMAND=$(cat <<EOF
+set -euo pipefail
+
+REPO_URL="${REPO_URL}"
+REMOTE_DIR="${REMOTE_DIR}"
+WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS}"
+PROJECTION_TIMEOUT_SECONDS="${PROJECTION_TIMEOUT_SECONDS}"
+REPO_PATH="\$HOME/\$REMOTE_DIR"
+
+sudo apt-get update
+sudo apt-get install -y git curl docker.io
+if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+  sudo apt-get install -y docker-compose-plugin || sudo apt-get install -y docker-compose
+fi
+
+sudo systemctl enable --now docker
+sudo usermod -aG docker "\$USER"
+
+if [ -d "\$REPO_PATH/.git" ]; then
+  cd "\$REPO_PATH"
+  git fetch origin
+  git checkout main
+  git pull --ff-only origin main
+else
+  git clone "\$REPO_URL" "\$REPO_PATH"
+  cd "\$REPO_PATH"
+fi
+
+# sg docker makes the fresh VM pick up docker-group access without requiring a new SSH session.
+sg docker -c "cd '\$REPO_PATH' && ./scripts/reset_data.sh && WAIT_TIMEOUT_SECONDS=\$WAIT_TIMEOUT_SECONDS PROJECTION_TIMEOUT_SECONDS=\$PROJECTION_TIMEOUT_SECONDS ./scripts/run_e2e.sh"
+EOF
+)
+
+gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --project=$PROJECT_ID --command="$REMOTE_COMMAND"
 
 echo "=================================================="
 echo "5. Retrieving External IP and verifying..."
@@ -61,7 +90,19 @@ echo "=================================================="
 VM_IP=$(gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE --project=$PROJECT_ID --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
 
 echo "Deployment complete! VM IP is $VM_IP"
-echo "Running test_vm.sh..."
+echo "Verifying public health endpoints..."
+curl -fsS "http://$VM_IP:8080/healthz" >/dev/null
+curl -fsS "http://$VM_IP:8082/healthz" >/dev/null
 
-# Temporarily override test_vm.sh with the dynamic IP
-./scripts/test_vm.sh "http://$VM_IP:8080"
+cat <<SUMMARY
+
+Deployment succeeded.
+
+API:       http://$VM_IP:8080
+Dashboard: http://$VM_IP:8082
+
+Suggested checks:
+  curl http://$VM_IP:8080/healthz
+  curl http://$VM_IP:8082/healthz
+  open http://$VM_IP:8082
+SUMMARY
