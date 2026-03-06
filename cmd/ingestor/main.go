@@ -31,6 +31,7 @@ func main() {
 	}
 	defer store.Close()
 
+	// The ingestor owns schema creation so startup DDL runs in one place.
 	if err := store.EnsureSchema(ctx); err != nil {
 		log.Fatalf("postgres schema failed: %v", err)
 	}
@@ -62,6 +63,7 @@ func main() {
 		iter := fetches.RecordIter()
 		for !iter.Done() {
 			record := iter.Next()
+			// Facts and outbox are written before committing Kafka offsets.
 			commit, err := handleRecord(ctx, store, record)
 			if err != nil {
 				log.Fatalf("ingest failed topic=%s partition=%d offset=%d: %v", record.Topic, record.Partition, record.Offset, err)
@@ -88,6 +90,7 @@ func handleRecord(ctx context.Context, store *pgstore.Store, record *kgo.Record)
 			log.Printf("skip malformed bid message offset=%d missing required fields", record.Offset)
 			return true, nil
 		}
+		// Bid ingestion only touches Postgres facts and the projection outbox.
 		_, err := store.IngestBid(ctx, evt, record.Value)
 		return true, err
 	case "impressions":
@@ -100,6 +103,7 @@ func handleRecord(ctx context.Context, store *pgstore.Store, record *kgo.Record)
 			log.Printf("skip malformed impression message offset=%d missing bid_id", record.Offset)
 			return true, nil
 		}
+		// Impression ingestion follows the same facts-first path.
 		_, err := store.IngestImpression(ctx, evt, record.Value)
 		return true, err
 	default:

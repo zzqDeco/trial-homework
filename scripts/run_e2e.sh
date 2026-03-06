@@ -1,4 +1,5 @@
 #!/bin/bash
+# Run the full clean-room pipeline: start services, generate load, verify topics, then check projection health.
 set -euo pipefail
 
 BASE_URL=${BASE_URL:-"http://127.0.0.1:8080"}
@@ -116,6 +117,7 @@ wait_for_projection_health() {
   from_ts=${window_bounds[0]}
   to_ts=${window_bounds[1]}
 
+  # Topic thresholds alone are not enough for B/C; wait until Redis-backed dashboard metrics turn non-zero too.
   echo "Waiting for ingestion and projection health"
   while (( SECONDS < deadline )); do
     require_running_container "postgres"

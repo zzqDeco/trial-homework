@@ -55,6 +55,7 @@ func main() {
 }
 
 func topicMessageCount(ctx context.Context, client *kgo.Client, topic string) (int64, error) {
+	// Message count is computed from earliest/latest offsets across every partition.
 	partitions, err := topicPartitions(ctx, client, topic)
 	if err != nil {
 		return 0, err
@@ -121,6 +122,7 @@ func topicPartitions(ctx context.Context, client *kgo.Client, topic string) ([]i
 }
 
 func listOffsets(ctx context.Context, client *kgo.Client, topic string, partitions []int32, timestamp int64) (map[int32]int64, error) {
+	// Franz-go exposes ListOffsets as a sharded request, so merge shard results back into one map.
 	req := kmsg.NewPtrListOffsetsRequest()
 	req.ReplicaID = -1
 

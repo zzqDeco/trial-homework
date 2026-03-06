@@ -128,14 +128,17 @@ func (s *dashboardServer) querySummary(ctx context.Context, from, to time.Time) 
 	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	switch {
 	case !to.After(cutoff):
+		// Historical ranges read from Postgres facts.
 		summary, err := s.store.Summary(ctx, from, to)
 		summary.Source = "postgres"
 		return summary, err
 	case !from.Before(cutoff):
+		// Recent ranges read from the Redis read model.
 		summary, err := s.model.Summary(ctx, from, to)
 		summary.Source = "redis"
 		return summary, err
 	default:
+		// Mixed ranges fan out to both stores in parallel and merge on the API side.
 		var left metrics.Summary
 		var right metrics.Summary
 		g, gctx := errgroup.WithContext(ctx)
@@ -169,6 +172,7 @@ func (s *dashboardServer) queryByCampaign(ctx context.Context, from, to time.Tim
 		items, err := s.model.ByCampaign(ctx, from, to)
 		return items, "redis", err
 	default:
+		// Mixed campaign queries reuse the same cutoff snapshot for both backends.
 		var left []metrics.CampaignMetrics
 		var right []metrics.CampaignMetrics
 		g, gctx := errgroup.WithContext(ctx)
@@ -201,6 +205,7 @@ func (s *dashboardServer) queryTimeSeries(ctx context.Context, from, to time.Tim
 		series.Source = "redis"
 		return series, err
 	default:
+		// Mixed time-series queries run both halves concurrently, then merge aligned buckets.
 		var left metrics.TimeSeries
 		var right metrics.TimeSeries
 		g, gctx := errgroup.WithContext(ctx)
@@ -244,6 +249,7 @@ func parseRange(r *http.Request) (time.Time, time.Time, error) {
 }
 
 func resolveResolution(raw string, from, to time.Time) string {
+	// Keep short windows detailed and automatically coarse-grain longer windows.
 	switch raw {
 	case "minute", "hour", "day":
 		return raw

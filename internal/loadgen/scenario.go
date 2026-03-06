@@ -28,6 +28,7 @@ type timedStage struct {
 	DelayedBillingRate float64
 }
 
+// DefaultConfig returns the default full workload profile used by the delivery scripts.
 func DefaultConfig() Config {
 	return Config{
 		BaseURL: "http://localhost:8080",
@@ -55,6 +56,7 @@ func DefaultConfig() Config {
 	}
 }
 
+// Run executes the timed workload first, then tops up edge cases to hit deterministic targets.
 func Run(ctx context.Context, cfg Config) (Report, error) {
 	collector := NewCollector(cfg)
 	client := NewClient(cfg)
@@ -67,6 +69,7 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		return report, err
 	}
 
+	// Timed stages create the traffic shape; top-up stages only guarantee the final thresholds.
 	stages := []timedStage{
 		{
 			Name:               "steady",
@@ -186,6 +189,7 @@ func runTimedStage(ctx context.Context, client *Client, collector *Collector, st
 	collector.StartStage(stage.Name)
 	defer collector.EndStage(stage.Name)
 
+	// A stage only controls admission of new iterations. In-flight requests run on their own timeout.
 	stageDeadline := time.Now().UTC().Add(stage.Duration)
 
 	var wg sync.WaitGroup
@@ -262,6 +266,7 @@ func runSingleStageIteration(ctx context.Context, client *Client, collector *Col
 		return
 	}
 
+	// Billing is emitted after a successful bid, with optional delay and duplicate replay.
 	delayed := false
 	if stage.DelayedBillingRate > 0 && r.Float64() < stage.DelayedBillingRate {
 		delayed = true
@@ -284,6 +289,7 @@ func runSingleStageIteration(ctx context.Context, client *Client, collector *Col
 }
 
 func topUpNoFill(ctx context.Context, client *Client, collector *Collector, cfg Config) error {
+	// Top-up helpers keep the final deliverable deterministic when timed stages undershoot a target.
 	collector.StartStage("topup_nofill")
 	defer collector.EndStage("topup_nofill")
 

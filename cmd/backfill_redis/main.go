@@ -36,6 +36,7 @@ func main() {
 		log.Fatalf("reset redis read model failed: %v", err)
 	}
 
+	// Rebuild the recent read model from Postgres facts in bid-first then impression order.
 	bids, err := store.RecentBids(ctx, since)
 	if err != nil {
 		log.Fatalf("load recent bids failed: %v", err)
@@ -46,6 +47,7 @@ func main() {
 		}
 	}
 
+	// Replaying impressions afterwards lets late-bid correction follow the same production path.
 	impressions, err := store.RecentImpressions(ctx, since)
 	if err != nil {
 		log.Fatalf("load recent impressions failed: %v", err)

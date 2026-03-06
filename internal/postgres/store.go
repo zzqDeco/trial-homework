@@ -18,10 +18,12 @@ const (
 	OutboxImpressionSeen = "impression_seen"
 )
 
+// Store persists fact rows in Postgres and manages the projection outbox.
 type Store struct {
 	pool *pgxpool.Pool
 }
 
+// OutboxRecord is a single pending projection event loaded from Postgres.
 type OutboxRecord struct {
 	ID        int64
 	EventType string
@@ -30,14 +32,17 @@ type OutboxRecord struct {
 	Payload   []byte
 }
 
+// BidRow wraps a bid fact row for replay or backfill.
 type BidRow struct {
 	Event event.BidEvent
 }
 
+// ImpressionRow wraps an impression fact row for replay or backfill.
 type ImpressionRow struct {
 	Event event.ImpressionEvent
 }
 
+// New opens a Postgres connection pool with startup retries for fresh containers.
 func New(ctx context.Context, dsn string) (*Store, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -71,6 +76,7 @@ func (s *Store) Close() {
 	s.pool.Close()
 }
 
+// EnsureSchema creates the fact and outbox tables required by the pipeline.
 func (s *Store) EnsureSchema(ctx context.Context) error {
 	const ddl = `
 CREATE TABLE IF NOT EXISTS bids (
@@ -110,6 +116,7 @@ CREATE INDEX IF NOT EXISTS projection_outbox_unprocessed_idx ON projection_outbo
 }
 
 func (s *Store) IngestBid(ctx context.Context, evt event.BidEvent, raw []byte) (bool, error) {
+	// 1. Insert the fact row idempotently.
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, err
@@ -121,17 +128,21 @@ func (s *Store) IngestBid(ctx context.Context, evt event.BidEvent, raw []byte) (
 		return false, err
 	}
 	if inserted {
+		// 2. Only create an outbox record for the first successful insert.
 		if err := insertOutbox(ctx, tx, OutboxBidSeen, evt.BidID, toTime(evt.Timestamp), raw); err != nil {
 			return false, err
 		}
 	}
+	// 3. Commit facts and outbox together so projection can be retried later.
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return inserted, nil
 }
 
+// IngestImpression stores an impression fact and queues its Redis projection.
 func (s *Store) IngestImpression(ctx context.Context, evt event.ImpressionEvent, raw []byte) (bool, error) {
+	// 1. Insert the fact row idempotently.
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, err
@@ -143,10 +154,12 @@ func (s *Store) IngestImpression(ctx context.Context, evt event.ImpressionEvent,
 		return false, err
 	}
 	if inserted {
+		// 2. Only create an outbox record for the first successful insert.
 		if err := insertOutbox(ctx, tx, OutboxImpressionSeen, evt.BidID, toTime(evt.Timestamp), raw); err != nil {
 			return false, err
 		}
 	}
+	// 3. Commit facts and outbox together so projection can be retried later.
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
@@ -154,6 +167,7 @@ func (s *Store) IngestImpression(ctx context.Context, evt event.ImpressionEvent,
 }
 
 func insertBid(ctx context.Context, tx pgx.Tx, evt event.BidEvent, raw []byte) (bool, error) {
+	// ON CONFLICT DO NOTHING keeps replayed Kafka records and duplicate facts idempotent.
 	result, err := tx.Exec(ctx, `
 INSERT INTO bids (bid_id, request_id, campaign_id, user_idfv, placement_id, event_ts, raw_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -166,6 +180,7 @@ ON CONFLICT DO NOTHING
 }
 
 func insertImpression(ctx context.Context, tx pgx.Tx, evt event.ImpressionEvent, raw []byte) (bool, error) {
+	// Impressions are deduplicated by bid_id for the assignment implementation.
 	result, err := tx.Exec(ctx, `
 INSERT INTO impressions (bid_id, event_ts, raw_json)
 VALUES ($1, $2, $3)
@@ -185,6 +200,7 @@ VALUES ($1, $2, $3, $4)
 	return err
 }
 
+// ProcessOutboxBatch locks a batch, applies Redis projection, then marks it processed.
 func (s *Store) ProcessOutboxBatch(ctx context.Context, limit int, apply func(context.Context, []OutboxRecord) error) (int, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -220,6 +236,7 @@ LIMIT $1
 		return 0, tx.Rollback(ctx)
 	}
 
+	// Apply the Redis-side projection before marking records as processed.
 	if err := apply(ctx, batch); err != nil {
 		return 0, err
 	}
@@ -228,6 +245,7 @@ LIMIT $1
 	for _, item := range batch {
 		ids = append(ids, item.ID)
 	}
+	// Mark the batch only after projection succeeds so failed Redis updates stay retryable.
 	if _, err := tx.Exec(ctx, `UPDATE projection_outbox SET processed_at = $1 WHERE id = ANY($2)`, time.Now().UTC(), ids); err != nil {
 		return 0, err
 	}

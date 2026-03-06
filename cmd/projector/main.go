@@ -40,6 +40,7 @@ func main() {
 		if ctx.Err() != nil {
 			return
 		}
+		// The projector only advances the Redis read model from the outbox; it does not own facts or schema.
 		count, err := store.ProcessOutboxBatch(ctx, batchSize, func(batchCtx context.Context, records []pgstore.OutboxRecord) error {
 			for _, record := range records {
 				if err := applyRecord(batchCtx, model, record); err != nil {
@@ -68,6 +69,7 @@ func main() {
 }
 
 func applyRecord(ctx context.Context, model *readmodel.Model, record pgstore.OutboxRecord) error {
+	// Projection is keyed by outbox type so Redis stays a derived read model, not a second fact store.
 	switch record.EventType {
 	case pgstore.OutboxBidSeen:
 		var evt event.BidEvent

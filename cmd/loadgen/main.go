@@ -15,6 +15,7 @@ import (
 func main() {
 	cfg := loadgen.DefaultConfig()
 
+	// Flags override the default full profile for smoke runs or VM-specific tuning.
 	flag.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL, "base URL for bidding server")
 	httpTimeoutMS := int(cfg.HTTPTimeout / time.Millisecond)
 	flag.IntVar(&httpTimeoutMS, "http-timeout-ms", httpTimeoutMS, "HTTP request timeout in milliseconds")
@@ -54,6 +55,7 @@ func main() {
 }
 
 func printSummary(report loadgen.Report, reportPath string) {
+	// Print a compact run summary while the full JSON report stays on disk.
 	type summary struct {
 		RunID                    string  `json:"run_id"`
 		ReportPath               string  `json:"report_path"`

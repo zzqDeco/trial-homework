@@ -21,10 +21,13 @@ const (
 	minuteLayout      = "200601021504"
 )
 
+// Model maintains the Redis-backed read model used by recent dashboard queries.
+// Postgres facts remain the source of truth.
 type Model struct {
 	client *redis.Client
 }
 
+// New opens a Redis client with startup retries for fresh containers.
 func New(ctx context.Context, addr string) (*Model, error) {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	var err error
@@ -48,6 +51,7 @@ func (m *Model) Close() error {
 	return m.client.Close()
 }
 
+// ProjectBid applies a bid fact to the Redis read model.
 func (m *Model) ProjectBid(ctx context.Context, evt event.BidEvent) error {
 	bucket := bucketFor(toTime(evt.Timestamp))
 	unknownKey := unknownKeyFor(evt.BidID)
@@ -57,6 +61,7 @@ func (m *Model) ProjectBid(ctx context.Context, evt event.BidEvent) error {
 	}
 
 	_, err = m.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		// 1. Persist bid metadata and increment bid-side counters for the bid timestamp.
 		bidKey := bidMetaKey(evt.BidID)
 		pipe.HSet(ctx, bidKey, map[string]interface{}{
 			"campaign_id":  evt.CampaignID,
@@ -76,6 +81,7 @@ func (m *Model) ProjectBid(ctx context.Context, evt event.BidEvent) error {
 		pipe.Expire(ctx, campaignMinuteKey(evt.CampaignID, bucket), readModelTTL)
 
 		if len(unknown) > 0 {
+			// 2. If the impression arrived first, move it from UNKNOWN into the real campaign.
 			impressionBucket := unknown["impression_bucket"]
 			incrementCounts(ctx, pipe, globalKey, -1, 1, 0)
 			incrementCounts(ctx, pipe, summaryMinuteKey(impressionBucket), -1, 1, 0)
@@ -92,6 +98,7 @@ func (m *Model) ProjectBid(ctx context.Context, evt event.BidEvent) error {
 			pipe.Del(ctx, unknownKey)
 		}
 
+		// 3. Record the most recent successful projection time for dashboard freshness display.
 		now := time.Now().UTC().Format(time.RFC3339)
 		pipe.HSet(ctx, globalKey, "last_projected_at", now)
 		return nil
@@ -99,6 +106,7 @@ func (m *Model) ProjectBid(ctx context.Context, evt event.BidEvent) error {
 	return err
 }
 
+// ProjectImpression applies an impression fact to the Redis read model.
 func (m *Model) ProjectImpression(ctx context.Context, evt event.ImpressionEvent) error {
 	bucket := bucketFor(toTime(evt.Timestamp))
 	bidKey := bidMetaKey(evt.BidID)
@@ -109,6 +117,7 @@ func (m *Model) ProjectImpression(ctx context.Context, evt event.ImpressionEvent
 
 	_, err = m.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		if campaignID != "" {
+			// The common path is a matched impression that can be counted immediately.
 			incrementCounts(ctx, pipe, globalKey, 0, 1, 0)
 			incrementCounts(ctx, pipe, summaryMinuteKey(bucket), 0, 1, 0)
 			pipe.Expire(ctx, summaryMinuteKey(bucket), readModelTTL)
@@ -117,6 +126,7 @@ func (m *Model) ProjectImpression(ctx context.Context, evt event.ImpressionEvent
 			incrementCounts(ctx, pipe, campaignMinuteKey(campaignID, bucket), 0, 1, 0)
 			pipe.Expire(ctx, campaignMinuteKey(campaignID, bucket), readModelTTL)
 		} else {
+			// Without bid metadata yet, treat it as UNKNOWN and leave a correction marker behind.
 			incrementCounts(ctx, pipe, globalKey, 1, 0, 0)
 			incrementCounts(ctx, pipe, summaryMinuteKey(bucket), 1, 0, 0)
 			pipe.Expire(ctx, summaryMinuteKey(bucket), readModelTTL)
@@ -138,11 +148,13 @@ func (m *Model) ProjectImpression(ctx context.Context, evt event.ImpressionEvent
 	return err
 }
 
+// Summary aggregates minute buckets for recent dashboard summary queries.
 func (m *Model) Summary(ctx context.Context, from, to time.Time) (metrics.Summary, error) {
 	summary := metrics.Summary{From: from.UTC(), To: to.UTC()}
 	buckets := minuteBuckets(from, to)
 	pipe := m.client.Pipeline()
 	cmds := make([]*redis.StringStringMapCmd, 0, len(buckets))
+	// Read every covered minute bucket and fold the counters in-process.
 	for _, bucket := range buckets {
 		cmds = append(cmds, pipe.HGetAll(ctx, summaryMinuteKey(bucket)))
 	}
@@ -168,6 +180,7 @@ func (m *Model) Summary(ctx context.Context, from, to time.Time) (metrics.Summar
 	return summary, nil
 }
 
+// ByCampaign aggregates minute buckets per campaign for recent dashboard queries.
 func (m *Model) ByCampaign(ctx context.Context, from, to time.Time) ([]metrics.CampaignMetrics, error) {
 	campaignIDs, err := m.client.SMembers(ctx, campaignSetKey).Result()
 	if err != nil && err != redis.Nil {
@@ -178,6 +191,7 @@ func (m *Model) ByCampaign(ctx context.Context, from, to time.Time) ([]metrics.C
 	items := make([]metrics.CampaignMetrics, 0, len(campaignIDs))
 
 	for _, campaignID := range campaignIDs {
+		// Campaign-level queries pay for the covered buckets once per campaign.
 		item := metrics.CampaignMetrics{CampaignID: campaignID}
 		pipe := m.client.Pipeline()
 		cmds := make([]*redis.StringStringMapCmd, 0, len(buckets))
@@ -204,6 +218,7 @@ func (m *Model) ByCampaign(ctx context.Context, from, to time.Time) ([]metrics.C
 	return metrics.NormalizeCampaigns(items), nil
 }
 
+// TimeSeries reads minute buckets and re-groups them into the requested resolution.
 func (m *Model) TimeSeries(ctx context.Context, from, to time.Time, resolution string) (metrics.TimeSeries, error) {
 	resolution = normalizeResolution(resolution)
 	series := metrics.TimeSeries{
@@ -223,6 +238,7 @@ func (m *Model) TimeSeries(ctx context.Context, from, to time.Time, resolution s
 		return series, err
 	}
 
+	// The read model only stores minute buckets; hour and day series are derived at query time.
 	grouped := make(map[time.Time]metrics.TimeSeriesPoint)
 	for _, bucket := range seriesBuckets(from, to, resolution) {
 		grouped[bucket] = metrics.TimeSeriesPoint{TS: bucket}
@@ -247,6 +263,7 @@ func (m *Model) TimeSeries(ctx context.Context, from, to time.Time, resolution s
 	return series, nil
 }
 
+// Reset clears the Redis read model so it can be rebuilt from Postgres facts.
 func (m *Model) Reset(ctx context.Context) error {
 	var cursor uint64
 	for {

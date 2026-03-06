@@ -23,6 +23,7 @@ type RequestResult struct {
 	Err          string
 }
 
+// BidRequestPayload matches the API contract for /v1/bid.
 type BidRequestPayload struct {
 	UserIDFV    string `json:"user_idfv"`
 	AppBundle   string `json:"app_bundle"`
@@ -30,6 +31,7 @@ type BidRequestPayload struct {
 	Timestamp   int64  `json:"timestamp"`
 }
 
+// BillingRequestPayload matches the API contract for /v1/billing.
 type BillingRequestPayload struct {
 	BidID     string `json:"bid_id"`
 	Timestamp int64  `json:"timestamp"`
@@ -46,6 +48,7 @@ type Client struct {
 	timeout    time.Duration
 }
 
+// NewClient builds the HTTP client used by the load generator.
 func NewClient(cfg Config) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(cfg.BaseURL, "/"),
@@ -57,6 +60,7 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
+// Healthz checks whether the bidding API is ready before the workload starts.
 func (c *Client) Healthz(ctx context.Context) error {
 	res := c.doRequest(ctx, http.MethodGet, c.baseURL+"/healthz", nil, "")
 	if res.NetworkError {
@@ -68,6 +72,7 @@ func (c *Client) Healthz(ctx context.Context) error {
 	return nil
 }
 
+// Bid issues a bid request and extracts the bid ID when the API returns a fill.
 func (c *Client) Bid(ctx context.Context, payload BidRequestPayload) (RequestResult, string, bool) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -90,6 +95,7 @@ func (c *Client) Bid(ctx context.Context, payload BidRequestPayload) (RequestRes
 	return res, bidResp.BidID, false
 }
 
+// Billing issues a normal JSON billing request.
 func (c *Client) Billing(ctx context.Context, payload BillingRequestPayload) RequestResult {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -98,6 +104,7 @@ func (c *Client) Billing(ctx context.Context, payload BillingRequestPayload) Req
 	return c.doRequest(ctx, http.MethodPost, c.baseURL+"/v1/billing", body, "application/json")
 }
 
+// RawBilling allows malformed bodies to be injected for negative test coverage.
 func (c *Client) RawBilling(ctx context.Context, body []byte) RequestResult {
 	return c.doRequest(ctx, http.MethodPost, c.baseURL+"/v1/billing", body, "application/json")
 }
@@ -105,6 +112,7 @@ func (c *Client) RawBilling(ctx context.Context, body []byte) RequestResult {
 func (c *Client) doRequest(ctx context.Context, method, reqURL string, body []byte, contentType string) RequestResult {
 	var retries int
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		// Each attempt gets its own timeout so stage scheduling does not decide request lifetime.
 		attemptCtx, cancel := context.WithTimeout(ctx, c.timeout)
 		res := c.doRequestOnce(attemptCtx, method, reqURL, body, contentType)
 		cancel()
@@ -140,6 +148,7 @@ func (c *Client) doRequestOnce(ctx context.Context, method, reqURL string, body 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// Transport failures stay separate from HTTP status codes so burst SLOs reflect real request failures.
 		return RequestResult{
 			NetworkError: true,
 			Timeout:      isTimeoutError(err),
@@ -164,6 +173,7 @@ func (c *Client) doRequestOnce(ctx context.Context, method, reqURL string, body 
 }
 
 func shouldRetry(res RequestResult) bool {
+	// Retries are reserved for transient transport failures and 5xx responses.
 	if res.NetworkError {
 		return true
 	}
