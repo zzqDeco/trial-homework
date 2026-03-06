@@ -455,7 +455,8 @@ export default function App() {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [campaigns, setCampaigns] = useState<CampaignMetrics[]>([])
   const [series, setSeries] = useState<TimeSeriesResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string>('')
   const [reloadNonce, setReloadNonce] = useState(0)
 
@@ -463,6 +464,7 @@ export default function App() {
   const fromDate = useMemo(() => fromLocalInputValue(fromValue), [fromValue])
   const toDate = useMemo(() => fromLocalInputValue(toValue), [toValue])
   const rangeValid = Number.isFinite(fromDate.getTime()) && Number.isFinite(toDate.getTime()) && fromDate < toDate
+  const hasLoadedData = summary !== null || series !== null || campaigns.length > 0
 
   useEffect(() => {
     localStorage.setItem(localeStorageKey, locale)
@@ -477,12 +479,17 @@ export default function App() {
   useEffect(() => {
     if (!rangeValid) {
       setError(text.invalidRange)
-      setLoading(false)
+      setIsInitialLoading(false)
+      setIsRefreshing(false)
       return
     }
 
     const controller = new AbortController()
-    setLoading(true)
+    if (hasLoadedData) {
+      setIsRefreshing(true)
+    } else {
+      setIsInitialLoading(true)
+    }
     setError('')
 
     const from = fromDate.toISOString()
@@ -506,16 +513,18 @@ export default function App() {
         setSummary(summaryJson)
         setCampaigns(reorderCampaigns(campaignsJson.campaigns))
         setSeries(seriesJson)
-        setLoading(false)
+        setIsInitialLoading(false)
+        setIsRefreshing(false)
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted) return
         setError(`${text.errorPrefix} ${err instanceof Error ? err.message : String(err)}`)
-        setLoading(false)
+        setIsInitialLoading(false)
+        setIsRefreshing(false)
       })
 
     return () => controller.abort()
-  }, [fromDate, rangeValid, reloadNonce, text.errorPrefix, toDate])
+  }, [fromDate, hasLoadedData, rangeValid, reloadNonce, text.errorPrefix, toDate])
 
   const onPreset = useCallback((presetKey: string, durationMs: number) => {
     const now = new Date()
@@ -540,6 +549,9 @@ export default function App() {
   return (
     <div className="app-shell">
       <main className="layout">
+        <div className={isRefreshing ? 'refresh-progress active' : 'refresh-progress'} aria-hidden="true">
+          <span />
+        </div>
         <header className="hero">
           <div className="hero-copy">
             <h1>{text.title}</h1>
@@ -554,7 +566,7 @@ export default function App() {
               </button>
             </div>
             <div className="status-block" aria-live="polite">
-              {loading ? <span>{text.loading}</span> : null}
+              {isInitialLoading ? <span>{text.loading}</span> : null}
               <span>{text.nextRefresh}: {formatDateTime(locale, nextRefreshAt)}</span>
             </div>
           </div>
@@ -603,80 +615,82 @@ export default function App() {
           {error ? <p className="error-text" role="alert">{error}</p> : null}
         </section>
 
-        <section className="kpi-grid">
-          <article className="kpi panel">
-            <span>{text.kpiViewRate}</span>
-            <strong>{formatPercent(locale, summary?.view_rate ?? 0)}</strong>
-          </article>
-          <article className="kpi panel">
-            <span>{text.kpiBidRequests}</span>
-            <strong>{formatNumber(locale, summary?.bid_requests ?? 0)}</strong>
-          </article>
-          <article className="kpi panel">
-            <span>{text.kpiDeduped}</span>
-            <strong>{formatNumber(locale, summary?.deduped_impressions ?? 0)}</strong>
-          </article>
-          <article className="kpi panel">
-            <span>{text.kpiUnknown}</span>
-            <strong>{formatNumber(locale, summary?.unknown_impressions ?? 0)}</strong>
-          </article>
-        </section>
+        <div className={isRefreshing ? 'data-shell is-refreshing' : 'data-shell'}>
+          <section className="kpi-grid">
+            <article className="kpi panel">
+              <span>{text.kpiViewRate}</span>
+              <strong>{formatPercent(locale, summary?.view_rate ?? 0)}</strong>
+            </article>
+            <article className="kpi panel">
+              <span>{text.kpiBidRequests}</span>
+              <strong>{formatNumber(locale, summary?.bid_requests ?? 0)}</strong>
+            </article>
+            <article className="kpi panel">
+              <span>{text.kpiDeduped}</span>
+              <strong>{formatNumber(locale, summary?.deduped_impressions ?? 0)}</strong>
+            </article>
+            <article className="kpi panel">
+              <span>{text.kpiUnknown}</span>
+              <strong>{formatNumber(locale, summary?.unknown_impressions ?? 0)}</strong>
+            </article>
+          </section>
 
-        <section className="chart-grid">
+          <section className="chart-grid">
+            <ChartPanel
+              title={text.lineTitle}
+              caption=""
+              option={buildTrendOption(locale, text, series ?? { source: 'redis', resolution: 'minute', points: [] })}
+            />
+            <ChartPanel
+              title={text.unknownTitle}
+              caption=""
+              option={buildUnknownOption(locale, text, series ?? { source: 'redis', resolution: 'minute', points: [] })}
+            />
+          </section>
+
           <ChartPanel
-            title={text.lineTitle}
+            title={text.campaignChartTitle}
             caption=""
-            option={buildTrendOption(locale, text, series ?? { source: 'redis', resolution: 'minute', points: [] })}
+            option={buildCampaignOption(text, campaigns)}
+            height={360}
           />
-          <ChartPanel
-            title={text.unknownTitle}
-            caption=""
-            option={buildUnknownOption(locale, text, series ?? { source: 'redis', resolution: 'minute', points: [] })}
-          />
-        </section>
 
-        <ChartPanel
-          title={text.campaignChartTitle}
-          caption=""
-          option={buildCampaignOption(text, campaigns)}
-          height={360}
-        />
-
-        <section className="panel table-panel">
-          <div className="panel-header">
-            <div>
-              <h2>{text.tableTitle}</h2>
+          <section className="panel table-panel">
+            <div className="panel-header">
+              <div>
+                <h2>{text.tableTitle}</h2>
+              </div>
             </div>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>{text.campaign}</th>
-                  <th>{text.bidRequests}</th>
-                  <th>{text.dedupedImpressions}</th>
-                  <th>{text.unknownImpressions}</th>
-                  <th>{text.kpiViewRate}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {campaigns.length === 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
                   <tr>
-                    <td colSpan={5} className="empty-cell">{text.empty}</td>
+                    <th>{text.campaign}</th>
+                    <th>{text.bidRequests}</th>
+                    <th>{text.dedupedImpressions}</th>
+                    <th>{text.unknownImpressions}</th>
+                    <th>{text.kpiViewRate}</th>
                   </tr>
-                ) : campaigns.map((item) => (
-                  <tr key={item.campaign_id}>
-                    <td>{item.campaign_id}</td>
-                    <td className="numeric">{formatNumber(locale, item.bid_requests)}</td>
-                    <td className="numeric">{formatNumber(locale, item.deduped_impressions)}</td>
-                    <td className="numeric">{formatNumber(locale, item.unknown_impressions)}</td>
-                    <td className="numeric">{formatPercent(locale, item.view_rate)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+                </thead>
+                <tbody>
+                  {campaigns.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="empty-cell">{text.empty}</td>
+                    </tr>
+                  ) : campaigns.map((item) => (
+                    <tr key={item.campaign_id}>
+                      <td>{item.campaign_id}</td>
+                      <td className="numeric">{formatNumber(locale, item.bid_requests)}</td>
+                      <td className="numeric">{formatNumber(locale, item.deduped_impressions)}</td>
+                      <td className="numeric">{formatNumber(locale, item.unknown_impressions)}</td>
+                      <td className="numeric">{formatPercent(locale, item.view_rate)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
       </main>
     </div>
   )

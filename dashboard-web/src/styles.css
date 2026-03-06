@@ -71,6 +71,30 @@ input:focus-visible {
   padding: 2rem 1rem 3rem;
 }
 
+.refresh-progress {
+  height: 2px;
+  margin-bottom: 1.25rem;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+
+.refresh-progress span {
+  display: block;
+  width: 35%;
+  height: 100%;
+  background: var(--accent);
+  transform: translateX(-120%);
+}
+
+.refresh-progress.active {
+  opacity: 1;
+}
+
+.refresh-progress.active span {
+  animation: refresh-progress 1.15s ease-in-out infinite;
+}
+
 .hero {
   display: grid;
   grid-template-columns: 1.4fr 1fr;
@@ -206,6 +230,14 @@ input:focus-visible {
   font-size: 0.92rem;
 }
 
+.data-shell {
+  transition: opacity 180ms ease;
+}
+
+.data-shell.is-refreshing {
+  opacity: 0.68;
+}
+
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -298,6 +330,16 @@ tbody tr:hover {
   color: var(--muted);
   text-align: center;
   padding: 2rem 1rem;
+}
+
+@keyframes refresh-progress {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
 }
 
 @media (max-width: 1100px) {
