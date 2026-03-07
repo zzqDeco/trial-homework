@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the full clean-room pipeline: start services, generate load, verify topics, then check projection health.
+# Run the full clean-room pipeline: validate behavior, generate load, then wait for end-to-end convergence.
 set -euo pipefail
 
 BASE_URL=${BASE_URL:-"http://127.0.0.1:8080"}
@@ -79,6 +79,11 @@ redis_hash_get() {
   docker exec redis redis-cli HGET "$key" "$field" 2>/dev/null || true
 }
 
+topic_count() {
+  local topic=$1
+  docker exec redpanda rpk topic describe "$topic" -p | awk 'NR > 1 {sum += $NF} END {print sum + 0}'
+}
+
 summary_window_bounds() {
   python3 - <<'PY'
 from datetime import datetime, timedelta, timezone
@@ -93,71 +98,104 @@ PY
 fetch_summary_info() {
   local from_ts=$1
   local to_ts=$2
-  curl -fsS "${DASHBOARD_URL}/api/metrics/summary?from=${from_ts}&to=${to_ts}" | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-print(data.get("bid_requests", 0))
+  local response
+  if ! response=$(curl -fsS "${DASHBOARD_URL}/api/metrics/summary?from=${from_ts}&to=${to_ts}" 2>/dev/null); then
+    cat <<'EOF'
+unknown
+0
+0
+0
+EOF
+    return 0
+  fi
+
+  SUMMARY_JSON="$response" python3 - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["SUMMARY_JSON"])
 print(data.get("source", "unknown"))
-'
+print(int(data.get("bid_requests", 0)))
+print(int(data.get("deduped_impressions", 0)))
+print(int(data.get("unknown_impressions", 0)))
+PY
 }
 
-wait_for_projection_health() {
+wait_for_full_convergence() {
   local deadline=$((SECONDS + PROJECTION_TIMEOUT_SECONDS))
-  local initial_backlog=""
-  local last_backlog=""
-  local backlog_decreased=false
   local from_ts
   local to_ts
+  local topic_bids=$1
+  local topic_impressions=$2
+  local postgres_bids=0
+  local postgres_impressions=0
+  local outbox_backlog=0
   local redis_bid_requests
-  local backlog
-  local summary_bid_requests
-  local summary_source
+  local redis_deduped_impressions
+  local redis_unknown_impressions
+  local summary_bid_requests=0
+  local summary_deduped_impressions=0
+  local summary_unknown_impressions=0
+  local summary_source=unknown
 
   mapfile -t window_bounds < <(summary_window_bounds)
   from_ts=${window_bounds[0]}
   to_ts=${window_bounds[1]}
 
-  # Topic thresholds alone are not enough for B/C; wait until Redis-backed dashboard metrics turn non-zero too.
-  echo "Waiting for ingestion and projection health"
+  echo "Waiting for full convergence from topics to Postgres, Redis, and dashboard summary"
   while (( SECONDS < deadline )); do
     require_running_container "postgres"
     require_running_container "ingestor"
     require_running_container "projector"
 
-    backlog=$(postgres_scalar "select count(*) from projection_outbox where processed_at is null;" | tr -d '[:space:]')
+    postgres_bids=$(postgres_scalar "select count(*) from bids;" | tr -d '[:space:]')
+    postgres_impressions=$(postgres_scalar "select count(*) from impressions;" | tr -d '[:space:]')
+    outbox_backlog=$(postgres_scalar "select count(*) from projection_outbox where processed_at is null;" | tr -d '[:space:]')
     redis_bid_requests=$(redis_hash_get "rm:global" "bid_requests" | tr -d '[:space:]')
+    redis_deduped_impressions=$(redis_hash_get "rm:global" "deduped_impressions" | tr -d '[:space:]')
+    redis_unknown_impressions=$(redis_hash_get "rm:global" "unknown_impressions" | tr -d '[:space:]')
+    [[ -n "$postgres_bids" ]] || postgres_bids=0
+    [[ -n "$postgres_impressions" ]] || postgres_impressions=0
+    [[ -n "$outbox_backlog" ]] || outbox_backlog=0
     [[ -n "$redis_bid_requests" ]] || redis_bid_requests=0
+    [[ -n "$redis_deduped_impressions" ]] || redis_deduped_impressions=0
+    [[ -n "$redis_unknown_impressions" ]] || redis_unknown_impressions=0
 
     mapfile -t summary_info < <(fetch_summary_info "$from_ts" "$to_ts")
-    summary_bid_requests=${summary_info[0]:-0}
-    summary_source=${summary_info[1]:-unknown}
+    summary_source=${summary_info[0]:-unknown}
+    summary_bid_requests=${summary_info[1]:-0}
+    summary_deduped_impressions=${summary_info[2]:-0}
+    summary_unknown_impressions=${summary_info[3]:-0}
 
-    if [[ -z "$initial_backlog" ]]; then
-      initial_backlog=$backlog
-    fi
-    if [[ -n "$last_backlog" ]] && (( backlog < last_backlog )); then
-      backlog_decreased=true
-    fi
-
-    if (( initial_backlog == 0 )); then
-      backlog_decreased=true
-    fi
-
-    if [[ "$summary_source" == "redis" ]] && (( redis_bid_requests > MIN_BIDS )) && (( summary_bid_requests > 0 )) && [[ "$backlog_decreased" == "true" ]]; then
-      echo "Projection health check passed: backlog=${backlog}, redis_bid_requests=${redis_bid_requests}, summary_bid_requests=${summary_bid_requests}"
+    if (( postgres_bids == topic_bids )) \
+      && (( postgres_impressions == topic_impressions )) \
+      && (( outbox_backlog == 0 )) \
+      && (( redis_bid_requests == topic_bids )) \
+      && (( redis_deduped_impressions + redis_unknown_impressions == topic_impressions )) \
+      && [[ "$summary_source" == "redis" ]] \
+      && (( summary_bid_requests == redis_bid_requests )) \
+      && (( summary_deduped_impressions == redis_deduped_impressions )) \
+      && (( summary_unknown_impressions == redis_unknown_impressions )); then
+      echo "Full convergence check passed: topic_bids=${topic_bids}, topic_impressions=${topic_impressions}, outbox_backlog=${outbox_backlog}"
       return 0
     fi
 
-    last_backlog=$backlog
     sleep 5
   done
 
-  echo "Projection health check failed." >&2
-  echo "  initial_backlog=${initial_backlog:-unknown}" >&2
-  echo "  last_backlog=${last_backlog:-unknown}" >&2
-  echo "  redis_bid_requests=${redis_bid_requests:-unknown}" >&2
-  echo "  summary_bid_requests=${summary_bid_requests:-unknown}" >&2
-  echo "  summary_source=${summary_source:-unknown}" >&2
+  echo "Full convergence check failed." >&2
+  echo "  topic_bids=${topic_bids}" >&2
+  echo "  topic_impressions=${topic_impressions}" >&2
+  echo "  postgres_bids=${postgres_bids}" >&2
+  echo "  postgres_impressions=${postgres_impressions}" >&2
+  echo "  outbox_backlog=${outbox_backlog}" >&2
+  echo "  redis_bid_requests=${redis_bid_requests}" >&2
+  echo "  redis_deduped_impressions=${redis_deduped_impressions}" >&2
+  echo "  redis_unknown_impressions=${redis_unknown_impressions}" >&2
+  echo "  summary_source=${summary_source}" >&2
+  echo "  summary_bid_requests=${summary_bid_requests}" >&2
+  echo "  summary_deduped_impressions=${summary_deduped_impressions}" >&2
+  echo "  summary_unknown_impressions=${summary_unknown_impressions}" >&2
   docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' >&2
   exit 1
 }
@@ -191,7 +229,9 @@ run_go_tool ./cmd/loadgen --base-url "${BASE_URL}" "${EXTRA_LOADGEN_ARGS[@]}"
 echo "Verifying topic counts via ${BROKERS}"
 run_go_tool ./cmd/verify_topic_counts --brokers "${BROKERS}" --min-bids "${MIN_BIDS}" --min-impressions "${MIN_IMPRESSIONS}"
 
-wait_for_projection_health
+topic_bids=$(topic_count "bid-requests")
+topic_impressions=$(topic_count "impressions")
+wait_for_full_convergence "${topic_bids}" "${topic_impressions}"
 
 cat <<SUMMARY
 

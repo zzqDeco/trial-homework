@@ -90,12 +90,57 @@ The final validated run used:
 
 Observed result:
 
-1. `targets_met=true`
-2. `burst_slo_met=true`
-3. `bid-requests=33825`
-4. `impressions=28487`
+1. pipeline behavior verification passed before the full-load phase
+2. `targets_met=true`
+3. `burst_slo_met=true`
+4. `bid-requests=29173`
+5. `impressions=24833`
 
 This result came from a clean reset rather than from accumulated historical topic data.
+
+## Pipeline behavior verification
+
+The final end-to-end flow now verifies more than throughput.
+
+1. `scripts/verify_pipeline_behavior.sh` runs before the full-load phase inside `run_e2e.sh`
+2. it validates public HTTP contract behavior:
+   - normal bid and billing
+   - duplicate billing idempotency
+   - campaign routing
+   - no-fill behavior
+   - unknown billing
+   - invalid billing requests
+3. it also validates downstream system behavior that is outside the public Deliverable A contract:
+   - late bid correction
+   - Redis rebuild consistency via `cmd/backfill_redis`
+
+### How late bid correction is validated
+
+The public HTTP APIs cannot generate an impression for a `bid_id` before that `bid_id` exists, so the verification script injects this case directly into Kafka.
+
+1. it writes an `impressions` event for a synthetic `bid_id`
+2. it waits until the system counts that event under `UNKNOWN`
+3. it then writes the corresponding `bid-requests` event with the same `bid_id`
+4. it waits until the projector corrects the read model by:
+   - removing the temporary `UNKNOWN` count
+   - moving the impression into the real campaign
+   - increasing `deduped_impressions`
+
+### How Redis rebuild consistency is validated
+
+The script also verifies that Redis remains a rebuildable read model rather than a separate source of truth.
+
+1. it captures `summary` and `by-campaign` snapshots from the live Redis-backed dashboard API
+2. it runs `cmd/backfill_redis`
+3. it re-queries the same snapshots
+4. it asserts that:
+   - Redis `summary` is unchanged
+   - Redis `by-campaign` output is unchanged
+   - Postgres fact row counts are unchanged
+
+This extra verification layer exists because topic thresholds alone do not prove that read-model correction and rebuild semantics are working correctly.
+
+The dashboard summary API no longer reports a `projection_lag_seconds` field. The previous value only measured time since the last successful projection write, which was easy to misread as queue lag. End-to-end convergence is now validated by `run_e2e.sh` using topic counts, Postgres fact counts, outbox backlog, Redis global counters, and the Redis-backed summary response.
 
 ## Deliverables B and C: Choice Analysis
 
@@ -129,9 +174,9 @@ Why it was not chosen:
 
 Quantitative support:
 
-1. the final clean-room run produced `33825 bids + 28487 impressions = 62312 facts`
-2. if that level of facts were retained for 30 days, the system would hold `62312 * 30 = 1,869,360 facts`
-3. if each fact consumes roughly `300B ~ 500B` of effective Redis memory overhead, that is approximately `561MB ~ 935MB`
+1. the latest clean-room run produced `29173 bids + 24833 impressions = 54006 facts`
+2. if that level of facts were retained for 30 days, the system would hold `54006 * 30 = 1,620,180 facts`
+3. if each fact consumes roughly `300B ~ 500B` of effective Redis memory overhead, that is approximately `486MB ~ 810MB`
 4. this is only an order-of-magnitude estimate and does not include AOF/RDB cost, fragmentation, or future scale growth
 
 Conclusion:
@@ -154,7 +199,7 @@ Quantitative support:
 1. if DB success probability is `p_db` and Redis success probability is `p_redis`, the single-sided success risk is approximately:
    - `p_db * (1 - p_redis) + p_redis * (1 - p_db)`
 2. if both are estimated at `99.9%`, the split-write risk is about `0.1998%`
-3. over `62312` facts, that corresponds to roughly `124` split-write opportunities
+3. over `54006` facts, that corresponds to roughly `108` split-write opportunities
 4. this is a simplified failure model, used to show magnitude rather than exact real-world rates
 
 Chosen design:
@@ -274,6 +319,7 @@ Current tradeoff:
 1. `hour/day` responses are currently recomputed by the API from minute buckets
 2. this keeps the write path simple
 3. the tradeoff is that long-range Redis reads still scale with minute-bucket count
+4. this is also why the next scale step should add coarser pre-aggregated resolutions rather than only relying on API-side regrouping
 
 Conclusion:
 
@@ -346,6 +392,23 @@ At higher scale, the main evolution path is:
 4. upgrade unknown handling from immediate unknown plus later correction to delayed finalization
 5. move long-range analytics from Postgres facts to an OLAP store such as ClickHouse
 
+The recommended next aggregation step is multi-resolution buckets:
+
+1. use second buckets for very recent windows that need sub-minute charts
+2. keep minute buckets for recent operational views
+3. add hour and day buckets for longer ranges
+4. choose the serving resolution based on query width so long-range reads stop scaling with minute-bucket count
+
+An optional later-stage alternative is a segment-tree-style range index, or a similar prefix/range-sum structure, on top of bucketed aggregates.
+
+1. this can reduce range-sum latency further when interval queries are extremely frequent
+2. it becomes more attractive when recent-window reads dominate and the query workload is heavily aggregation-driven
+3. it is not the recommended next step here because:
+   - late bid correction mutates historical buckets
+   - `backfill_redis` rebuilds the read model from facts
+   - segment-tree maintenance would make correction and rebuild logic substantially more complex
+4. for this reason, multi-resolution buckets are the preferred 100x path, while segment trees remain a higher-complexity optimization for a later bottleneck
+
 The most important semantic upgrade at 100x scale is the unknown policy.
 
 1. the homework version accepts immediate unknown plus later correction
@@ -357,17 +420,13 @@ The final stable proof point is the latest clean-room full run.
 
 1. `./scripts/reset_data.sh`
 2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh`
-3. `targets_met=true`
-4. `burst_slo_met=true`
-5. `bid-requests=33825`
-6. `impressions=28487`
-7. `projection_outbox backlog=0`
-8. dashboard summary returned non-zero Redis-backed metrics
-
-Representative stable dashboard summary values after the system caught up:
-
-1. `source=redis`
-2. `bid_requests=33825`
-3. `deduped_impressions=27487`
-4. `unknown_impressions=1000`
-5. `view_rate≈0.8126`
+3. pipeline behavior verification passed:
+   - HTTP contract checks
+   - late bid correction check
+   - Redis backfill rebuild check
+4. `targets_met=true`
+5. `burst_slo_met=true`
+6. `bid-requests=29173`
+7. `impressions=24833`
+8. full convergence check passed
+9. dashboard summary returned non-zero Redis-backed metrics

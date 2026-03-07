@@ -91,7 +91,15 @@ Timeseries:
 curl 'http://localhost:8082/api/metrics/timeseries?from=2026-03-06T00:00:00Z&to=2026-03-07T00:00:00Z&resolution=auto'
 ```
 
-`run_e2e.sh` validates load generation, topic thresholds, service liveness, projection health, and non-zero dashboard metrics.
+Pipeline behavior checks:
+
+```bash
+./scripts/verify_pipeline_behavior.sh
+```
+
+`verify_pipeline_behavior.sh` validates HTTP side effects, late bid correction, and Redis rebuild consistency.
+
+`run_e2e.sh` first validates request-side and downstream pipeline behavior, then runs the full load, topic threshold checks, and full convergence checks across topics, Postgres, Redis, and dashboard summary.
 
 ## Latest Validated Result
 
@@ -102,12 +110,13 @@ The latest clean-room full run used:
 
 Observed result:
 
-1. `targets_met=true`
-2. `burst_slo_met=true`
-3. `bid-requests=33825`
-4. `impressions=28487`
-5. `projection_outbox backlog=0`
-6. Dashboard summary returned non-zero Redis-backed metrics
+1. pipeline behavior verification passed
+2. `targets_met=true`
+3. `burst_slo_met=true`
+4. `bid-requests=29173`
+5. `impressions=24833`
+6. full convergence check passed
+7. Dashboard summary returned non-zero Redis-backed metrics
 
 ## Additional Documentation
 

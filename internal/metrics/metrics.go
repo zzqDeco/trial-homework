@@ -14,7 +14,6 @@ type Summary struct {
 	UnknownImpressions  int64      `json:"unknown_impressions"`
 	ViewRate            float64    `json:"view_rate"`
 	LastProjectedAt     *time.Time `json:"last_projected_at,omitempty"`
-	ProjectionLagSecond float64    `json:"projection_lag_seconds,omitempty"`
 }
 
 type CampaignMetrics struct {
@@ -41,14 +40,8 @@ type TimeSeries struct {
 	Points     []TimeSeriesPoint `json:"points"`
 }
 
-func (s *Summary) Finalize(now time.Time) {
+func (s *Summary) Finalize(_ time.Time) {
 	s.ViewRate = ComputeViewRate(s.DedupedImpressions, s.BidRequests)
-	if s.LastProjectedAt != nil {
-		s.ProjectionLagSecond = now.Sub(*s.LastProjectedAt).Seconds()
-		if s.ProjectionLagSecond < 0 {
-			s.ProjectionLagSecond = 0
-		}
-	}
 }
 
 func ComputeViewRate(numerator, denominator int64) float64 {

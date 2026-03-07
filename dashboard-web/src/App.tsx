@@ -12,7 +12,6 @@ type Summary = {
   unknown_impressions: number
   view_rate: number
   last_projected_at?: string
-  projection_lag_seconds?: number
 }
 
 type CampaignMetrics = {
