@@ -12,10 +12,14 @@ This repository delivers the complete event pipeline and dashboard implementatio
 
 ## Architecture Overview
 
-`HTTP API -> Redpanda -> ingestor -> Postgres + projection_outbox -> projector -> Redis -> dashboard-api -> dashboard-web`
+1. `POST /v1/bid -> Redpanda(bid-requests)`
+2. `POST /v1/billing -> Redis request-side idempotency -> Redpanda(impressions)`
+3. `Redpanda -> ingestor -> Postgres facts + projection_outbox -> projector -> Redis read model -> dashboard-api -> dashboard-web`
 
 1. Postgres is the fact store.
-2. Redis is the recent read model.
+2. Redis serves two roles:
+   - request-side billing idempotency
+   - recent dashboard read model
 3. `dashboard-api` routes between Redis, Postgres, and mixed queries.
 4. `dashboard-web` is a separate frontend container.
 5. The public dashboard entrypoint is `http://<VM_IP>:8082`.
@@ -49,10 +53,12 @@ This repository delivers the complete event pipeline and dashboard implementatio
 ## Quick Start
 
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ./scripts/reset_data.sh
-WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh
+WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=240 ./scripts/run_e2e.sh
 ```
+
+If your environment only provides the legacy binary, replace `docker compose` with `docker-compose`.
 
 Access points:
 
@@ -106,15 +112,15 @@ Pipeline behavior checks:
 The latest clean-room full run used:
 
 1. `./scripts/reset_data.sh`
-2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh`
+2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=240 ./scripts/run_e2e.sh`
 
 Observed result:
 
 1. pipeline behavior verification passed
 2. `targets_met=true`
 3. `burst_slo_met=true`
-4. `bid-requests=29173`
-5. `impressions=24833`
+4. `bid-requests=32022`
+5. `impressions=26789`
 6. full convergence check passed
 7. Dashboard summary returned non-zero Redis-backed metrics
 

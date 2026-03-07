@@ -8,12 +8,16 @@ This document explains how the final submission implements Deliverables A, B, C,
 
 The delivered system is:
 
-`HTTP API -> Redpanda -> ingestor -> Postgres facts + projection_outbox -> projector -> Redis read model -> dashboard-api -> dashboard-web`
+1. `POST /v1/bid -> Redpanda(bid-requests)`
+2. `POST /v1/billing -> Redis request-side idempotency -> Redpanda(impressions)`
+3. `Redpanda -> ingestor -> Postgres facts + projection_outbox -> projector -> Redis read model -> dashboard-api -> dashboard-web`
 
 Key properties of the final design:
 
 1. Postgres is the fact store.
-2. Redis is the recent 30-day read model.
+2. Redis serves two roles:
+   - request-side billing idempotency
+   - recent 30-day dashboard read model
 3. `dashboard-api` owns query routing and time-series aggregation.
 4. `dashboard-web` is a separate frontend container.
 5. The public dashboard entrypoint is `http://<VM_IP>:8082`.
@@ -34,25 +38,52 @@ Homework-specific simplification:
 2. an impression that arrives before its bid is counted as unknown immediately
 3. if the matching bid arrives later, the projector corrects the counts by moving the impression from `UNKNOWN` into the real campaign and from `unknown_impressions` into `deduped_impressions`
 
-### How late bid correction works
+## Deduplication and idempotency layers
 
-The homework version does not delay classification; it relies on correction in the Redis read model.
+The delivered system handles duplicate or replayed data at three different layers.
 
-1. if an impression is projected before Redis has bid metadata for the same `bid_id`, the projector records it under `UNKNOWN` and stores a small correction marker keyed by that `bid_id`
-2. if the matching bid is projected later, `ProjectBid` checks for that correction marker
-3. when the marker exists, the projector:
+### Request-side idempotency
+
+1. duplicate `/v1/billing` requests are suppressed before another impression event is produced
+2. this is implemented with the Redis key `billing:<bid_id>`
+3. the billing idempotency key uses a `24h` TTL
+
+### Fact-level idempotency
+
+1. duplicate Kafka delivery or replay is absorbed at the Postgres fact layer
+2. this is implemented with primary keys and `ON CONFLICT DO NOTHING`
+3. this prevents duplicated facts even when consumers restart or replay offsets
+
+### Read-model consistency
+
+1. the projector and Redis read model handle unknown classification and late bid correction
+2. this is not the same thing as request deduplication
+3. Redis read-model keys use a `31d` TTL because they serve recent dashboard queries and rebuild workflows
+
+## Unknown handling and correction
+
+### Homework-scale policy
+
+1. the homework version does not use a waiting window before classifying unknown impressions
+2. an impression without bid metadata is counted under `UNKNOWN` immediately
+3. if the matching bid arrives later, the read model is corrected
+
+### How unknown is represented
+
+1. unmatched impressions are counted under the synthetic campaign `UNKNOWN`
+2. the Redis read model stores a small correction marker keyed by `bid_id`
+3. this lets the projector revisit the temporary `UNKNOWN` classification when the matching bid appears
+
+### How correction works
+
+1. if bid metadata is already present in Redis, the impression is counted as matched immediately
+2. if the impression is projected first, the later `bid_seen` projection:
    - subtracts the impression from `unknown_impressions`
    - subtracts it from the `UNKNOWN` campaign bucket
    - adds it to `deduped_impressions`
    - adds it to the real campaign bucket
-4. this means the system is eventually corrected even when the impression is seen first
 
-There are two common cases:
-
-1. if the bid has already been projected into Redis before the impression is projected, the impression is counted as matched immediately
-2. if both events are already in the outbox but the impression is projected first, the later `bid_seen` projection performs the correction
-
-This is intentionally weaker than a delayed finalization window. It favors lower implementation complexity for the homework while still avoiding permanent misclassification.
+This is intentionally simpler than delayed finalization, which is discussed in the 100x section.
 
 ## Deliverable A
 
@@ -86,15 +117,15 @@ The generated traffic includes:
 The final validated run used:
 
 1. `./scripts/reset_data.sh`
-2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh`
+2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=240 ./scripts/run_e2e.sh`
 
 Observed result:
 
 1. pipeline behavior verification passed before the full-load phase
 2. `targets_met=true`
 3. `burst_slo_met=true`
-4. `bid-requests=29173`
-5. `impressions=24833`
+4. `bid-requests=32022`
+5. `impressions=26789`
 
 This result came from a clean reset rather than from accumulated historical topic data.
 
@@ -113,6 +144,7 @@ The final end-to-end flow now verifies more than throughput.
 3. it also validates downstream system behavior that is outside the public Deliverable A contract:
    - late bid correction
    - Redis rebuild consistency via `cmd/backfill_redis`
+4. the behavior checks therefore cover both request-side idempotency (duplicate billing suppression) and downstream read-model correction semantics
 
 ### How late bid correction is validated
 
@@ -154,6 +186,7 @@ The delivered system keeps facts in Postgres and serves recent dashboard queries
    - Postgres stores durable event facts
    - Redis stores recent read-model aggregates
    - `dashboard-api` routes between them
+4. Redis is not only the recent read model; it also provides the request-side billing idempotency used before impression events are produced
 
 ### Why not Redis-only
 
@@ -174,9 +207,9 @@ Why it was not chosen:
 
 Quantitative support:
 
-1. the latest clean-room run produced `29173 bids + 24833 impressions = 54006 facts`
-2. if that level of facts were retained for 30 days, the system would hold `54006 * 30 = 1,620,180 facts`
-3. if each fact consumes roughly `300B ~ 500B` of effective Redis memory overhead, that is approximately `486MB ~ 810MB`
+1. the latest clean-room run produced `32022 bids + 26789 impressions = 58811 facts`
+2. if that level of facts were retained for 30 days, the system would hold `58811 * 30 = 1,764,330 facts`
+3. if each fact consumes roughly `300B ~ 500B` of effective Redis memory overhead, that is approximately `529MB ~ 882MB`
 4. this is only an order-of-magnitude estimate and does not include AOF/RDB cost, fragmentation, or future scale growth
 
 Conclusion:
@@ -199,7 +232,7 @@ Quantitative support:
 1. if DB success probability is `p_db` and Redis success probability is `p_redis`, the single-sided success risk is approximately:
    - `p_db * (1 - p_redis) + p_redis * (1 - p_db)`
 2. if both are estimated at `99.9%`, the split-write risk is about `0.1998%`
-3. over `54006` facts, that corresponds to roughly `108` split-write opportunities
+3. over `58811` facts, that corresponds to roughly `118` split-write opportunities
 4. this is a simplified failure model, used to show magnitude rather than exact real-world rates
 
 Chosen design:
@@ -419,14 +452,14 @@ The most important semantic upgrade at 100x scale is the unknown policy.
 The final stable proof point is the latest clean-room full run.
 
 1. `./scripts/reset_data.sh`
-2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=120 ./scripts/run_e2e.sh`
+2. `WAIT_TIMEOUT_SECONDS=300 PROJECTION_TIMEOUT_SECONDS=240 ./scripts/run_e2e.sh`
 3. pipeline behavior verification passed:
    - HTTP contract checks
    - late bid correction check
    - Redis backfill rebuild check
 4. `targets_met=true`
 5. `burst_slo_met=true`
-6. `bid-requests=29173`
-7. `impressions=24833`
+6. `bid-requests=32022`
+7. `impressions=26789`
 8. full convergence check passed
 9. dashboard summary returned non-zero Redis-backed metrics
