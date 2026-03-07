@@ -182,6 +182,9 @@ echo "Bringing up services"
 wait_for_http "${BASE_URL}/healthz" "API"
 wait_for_http "${DASHBOARD_URL}/healthz" "Dashboard"
 
+echo "Verifying pipeline behavior against ${BASE_URL}"
+(cd "$ROOT_DIR" && ./scripts/verify_pipeline_behavior.sh "${BASE_URL}")
+
 echo "Running Deliverable A load generation against ${BASE_URL}"
 run_go_tool ./cmd/loadgen --base-url "${BASE_URL}" "${EXTRA_LOADGEN_ARGS[@]}"
 

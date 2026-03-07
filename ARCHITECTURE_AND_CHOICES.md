@@ -34,6 +34,26 @@ Homework-specific simplification:
 2. an impression that arrives before its bid is counted as unknown immediately
 3. if the matching bid arrives later, the projector corrects the counts by moving the impression from `UNKNOWN` into the real campaign and from `unknown_impressions` into `deduped_impressions`
 
+### How late bid correction works
+
+The homework version does not delay classification; it relies on correction in the Redis read model.
+
+1. if an impression is projected before Redis has bid metadata for the same `bid_id`, the projector records it under `UNKNOWN` and stores a small correction marker keyed by that `bid_id`
+2. if the matching bid is projected later, `ProjectBid` checks for that correction marker
+3. when the marker exists, the projector:
+   - subtracts the impression from `unknown_impressions`
+   - subtracts it from the `UNKNOWN` campaign bucket
+   - adds it to `deduped_impressions`
+   - adds it to the real campaign bucket
+4. this means the system is eventually corrected even when the impression is seen first
+
+There are two common cases:
+
+1. if the bid has already been projected into Redis before the impression is projected, the impression is counted as matched immediately
+2. if both events are already in the outbox but the impression is projected first, the later `bid_seen` projection performs the correction
+
+This is intentionally weaker than a delayed finalization window. It favors lower implementation complexity for the homework while still avoiding permanent misclassification.
+
 ## Deliverable A
 
 ### Objective
